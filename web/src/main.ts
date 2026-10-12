@@ -69,7 +69,11 @@ import { fontFileName, OpfsFontFiles } from './storage/font-store.ts';
 import { openProxyStorage } from './storage/proxy-store.ts';
 import { waveformCache } from './media/waveform-generator.ts';
 // Fase 7+: timeline drop capture and the ?debug=1 diagnostics panel.
-import { installDropGuard, installFileDrop } from './ui/timeline/file-drop.ts';
+import { installFileDrop } from './ui/timeline/file-drop.ts';
+// Fase 7+ (import bulletproofing): window-wide drop capture and the one
+// file picker attached to the DOM.
+import { installGlobalDrop } from './ui/global-drop.ts';
+import { installGlobalFileInput } from './ui/global-file-input.ts';
 import { mountDebugPanel } from './ui/debug-panel.ts';
 import { formatEta } from './export/bitrate-estimator.ts';
 import type { OpenedPackage } from './storage/project-package.ts';
@@ -162,6 +166,8 @@ class EditorApp implements AppContext {
   /** Fase 6: the I/O range badge in the header. */
   private rangeBadge: HTMLElement | null = null;
   private autosaveTimer: ReturnType<typeof setInterval> | null = null;
+  /** Import bulletproofing: one library repaint per burst of pool events. */
+  private mediaRefreshQueued = false;
 
   constructor() {
     this.mediaStore = new MediaStore(new MemoryKeyValue());
@@ -250,13 +256,27 @@ class EditorApp implements AppContext {
     this.timelinePanel = new TimelinePanel(layout.timelinePanel, this);
     this.inspectorPanel = new InspectorPanel(layout.inspectorPanel, this);
 
-    // Fase 7+: OS file drops on the timeline import into the library, and a
-    // window-level guard stops the browser navigating away on any other
-    // drop (the old behaviour opened the raw file and lost the session).
+    // Fase 7+: OS file drops on the timeline import into the library.
     installFileDrop(layout.timelinePanel, {
       onFiles: (files) => void this.importFiles(files),
     });
-    installDropGuard();
+    // Import bulletproofing: a drop ANYWHERE (header, preview, gaps, body)
+    // is captured, the browser never navigates to the dropped file, and the
+    // files land in the library through the same optimistic import path.
+    window.addEventListener(
+      'pagehide',
+      installGlobalDrop({
+        // The "Procesando N archivo(s)…" toast is shown by importFiles, the
+        // one entry point every import path goes through.
+        onFiles: (files) => void this.importFiles(files),
+      }).dispose,
+      { once: true },
+    );
+    // …and one picker, attached to the DOM, behind every "importar" button.
+    installGlobalFileInput({ onFiles: (files) => void this.importFiles(files) });
+    // The optimistic cards repaint the library the moment they land.
+    this.pool.onMediaAdded = () => this.queueMediaRefresh();
+    this.pool.onMediaUpdated = () => this.queueMediaRefresh();
     // Fase 7+: `?debug=1` mounts the diagnostics panel (engine, codecs,
     // OPFS/IndexedDB, service worker caches) for import troubleshooting.
     void mountDebugPanel(document.body);
@@ -319,34 +339,100 @@ class EditorApp implements AppContext {
     // BulkImporter (2 in parallel, per-file errors never stop the batch).
     for (const file of files.filter((f) => SUBTITLE_FILE.test(f.name))) await this.media.importSubtitles(file);
     const media = files.filter((f) => !SUBTITLE_FILE.test(f.name));
-    if (media.length > 0) {
-      const importer = new BulkImporter<MediaItem>((source) => this.importOne(source.file), { concurrency: 2, acceptUnknown: true });
-      for await (const event of importer.run(media)) {
+    if (media.length === 0) {
+      document.dispatchEvent(new CustomEvent('media-library-changed'));
+      this.requestAutosave();
+      return;
+    }
+
+    // Import bulletproofing: every file gets its card NOW — before a single
+    // byte is probed — and the metadata is filled in from the background.
+    this.notifications.info('Procesando…', `Procesando ${media.length} archivo(s)…`);
+    const { accepted, rejected, ready } = this.pool.addFiles(media);
+    for (const file of rejected) {
+      console.warn('[MediaImport] Archivo no compatible:', file.name, file.type);
+      this.notifications.warning('Archivo no compatible', `El archivo '${file.name}' no es un medio de audio, video o imagen válido.`);
+    }
+    this.queueMediaRefresh();
+
+    // The importer reuses the very card the drop created, so each file is
+    // probed once and stored as soon as its metadata is known.
+    const ids = new Map<File | Blob, string>(accepted.map((entry) => [entry.file, entry.asset.id]));
+    const queue = media.filter((file) => !rejected.includes(file));
+    if (queue.length > 0) {
+      const importer = new BulkImporter<MediaItem>((source) => this.importOne(source.file, ids.get(source.file)), { concurrency: 2, acceptUnknown: true });
+      for await (const event of importer.run(queue)) {
         if (event.type === 'complete') this.notifications.success('Medio importado', event.result.name);
         else if (event.type === 'error') this.notifications.error('Error al importar', `${event.name}: ${event.error}`);
       }
     }
-    document.dispatchEvent(new CustomEvent('media-library-changed'));
+    await ready;
+    this.queueMediaRefresh();
     this.requestAutosave();
   }
 
   /**
    * Imports one file: pool, OPFS, bin item, waveforms, fingerprint and the
    * automatic proxy policy (Fase 4).
+   *
+   * The file is never lost: the library card exists from the first moment
+   * (the optimistic shell of {@link MediaPool.addMedia}), the bin item is
+   * created even when the browser could not read the metadata, and storing
+   * the bytes in OPFS is best-effort (a private-mode browser that refuses
+   * the write must not abort the import).
+   *
    * @param file the local file.
+   * @param id the id of the card the drop/picker already created, if any.
    * @returns the new bin item.
    */
-  async importOne(file: File): Promise<MediaItem> {
-    const id = crypto.randomUUID();
+  async importOne(file: File, id: string = crypto.randomUUID()): Promise<MediaItem> {
+    // The pool logs "[MediaImport] Archivo recibido" when it registers the
+    // card, so every path (drop, picker, folder scan) traces the file once.
     const asset = await this.pool.addMedia(file, id, file.name);
-    const info = this.pool.getDecoder(id)?.mediaInfo;
-    if (info) await this.mediaStore.importFile(file, info, id, file.name);
+    const info = this.pool.getDecoder(id)?.mediaInfo ?? null;
+    // The bin item comes before the storage copy: the file is usable in the
+    // timeline even when OPFS is unavailable.
     const item = this.toMediaItem(asset.id, asset.name, asset);
     this.session.addMediaItem(item);
+    if (asset.status === 'ready') {
+      console.info('[MediaImport] Metadatos actualizados OK:', file.name, `${asset.width}×${asset.height}`);
+    } else if (info) {
+      console.info('[MediaImport] Metadatos provisionales:', file.name, `${asset.width}×${asset.height}`);
+    }
+    if (info) {
+      try {
+        await this.mediaStore.importFile(file, info, id, file.name);
+        console.info('[MediaImport] OPFS guardado OK:', file.name);
+      } catch (error) {
+        console.warn('[MediaImport] No se pudo guardar en OPFS:', file.name, error);
+      }
+    } else {
+      console.warn('[MediaImport] Sin metadatos: el medio queda disponible solo en esta sesión:', file.name);
+    }
     void this.generateWaveforms(file, asset.id);
     void this.media.fingerprint(id, file);
     if (info) this.media.autoProxy(id, info);
     return item;
+  }
+
+  /**
+   * Repaints the library after a pool change: the first change of a burst is
+   * painted synchronously (the card must be visible in milliseconds), the
+   * rest are coalesced into one repaint on the next tick so a drop of 100
+   * files does not rebuild the grid 100 times.
+   */
+  private queueMediaRefresh(): void {
+    if (this.mediaRefreshQueued) return;
+    this.mediaRefreshQueued = true;
+    // The first change of the burst paints the card synchronously...
+    this.mediaPanel?.refresh();
+    // ...and the tick that follows repaints once with everything that landed,
+    // then tells the rest of the app (one event per burst, not one per file).
+    globalThis.setTimeout(() => {
+      this.mediaRefreshQueued = false;
+      this.mediaPanel?.refresh();
+      document.dispatchEvent(new CustomEvent('media-library-changed'));
+    }, 0);
   }
 
   /** Fase 4 {@link ToolkitHost}: the preview canvas. */

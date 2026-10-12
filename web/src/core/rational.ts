@@ -62,6 +62,18 @@ export class Rational {
   static readonly ONE: Rational = new Rational(1n, 1n);
 
   /**
+   * The value `num / den`, reduced (zero when the denominator is 0 — the
+   * tolerant counterpart of {@link Rational.new}, for provisional values).
+   * @param num the numerator.
+   * @param den the denominator.
+   * @returns the ratio as a `Rational`.
+   */
+  static fromRatio(num: bigint | number, den: bigint | number): Rational {
+    const denominator = BigInt(den);
+    return denominator === 0n ? Rational.ZERO : Rational.new(BigInt(num), denominator);
+  }
+
+  /**
    * Builds `num / den` in lowest terms.
    * Throws when the denominator is zero or the reduced terms do not fit in
    * `i64` — the same contract as Rust `Rational::new`, which panics.

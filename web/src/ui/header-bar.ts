@@ -18,6 +18,7 @@ import markUrl from '../assets/concat-mark.png';
 import { getMediaTools } from './media-tools.ts';
 import { getProductionServices } from './production-services.ts';
 import { icon, iconButton, setButtonIcon, type IconName } from './components/icons.ts';
+import { openGlobalFilePicker } from './global-file-input.ts';
 
 /** Fase 7: the glyph of each palette on the theme toggle. */
 const THEME_ICONS: Record<ThemeName, IconName> = { dark: 'moon', light: 'sun', cyberpunk: 'zap' };
@@ -105,6 +106,9 @@ export class HeaderBar {
     actions.appendChild(undo);
     actions.appendChild(redo);
     actions.appendChild(this.actionButton('save', 'Guardar', 'Ctrl+S', () => void this.ctx.saveProject()));
+    // Import bulletproofing: the header's own "+" opens the same DOM-attached
+    // picker as the media panel, so importing works from anywhere.
+    actions.appendChild(this.actionButton('videoPlus', 'Importar medios', 'Ctrl+I', () => this.openImport()));
     // Fase 4: proxy playback toggle.
     this.proxyToggle = document.createElement('button');
     this.proxyToggle.type = 'button';
@@ -212,7 +216,7 @@ export class HeaderBar {
     list.appendChild(this.menuItem('Nuevo proyecto', 'Ctrl+N', () => void this.newProject()));
     list.appendChild(this.menuItem('Abrir proyecto…', 'Ctrl+O', () => this.openProjectModal()));
     list.appendChild(this.menuItem('Guardar', 'Ctrl+S', () => void this.ctx.saveProject()));
-    list.appendChild(this.menuItem('Importar medios…', 'Ctrl+I', () => document.dispatchEvent(new CustomEvent('open-import'))));
+    list.appendChild(this.menuItem('Importar medios…', 'Ctrl+I', () => this.openImport()));
     // Fase 4 entries.
     const tools = getMediaTools();
     if (tools) {
@@ -260,14 +264,39 @@ export class HeaderBar {
   }
 
   /** Opens a one-file picker (Fase 4). */
+  /**
+   * Opens the global media picker (the one attached to `document.body`) and
+   * falls back to the `open-import` event when it is not installed.
+   */
+  private openImport(): void {
+    if (!openGlobalFilePicker()) document.dispatchEvent(new CustomEvent('open-import'));
+  }
+
+  /**
+   * A one-shot picker (subtitles, LUTs). The input is attached to the
+   * document before clicking: a detached input does not fire `change` in
+   * several mobile and desktop browsers.
+   */
   private pickFile(accept: string, onFile: (file: File) => void): void {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = accept;
+    input.hidden = true;
+    input.setAttribute('aria-hidden', 'true');
+    input.setAttribute('style', 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;');
+    document.body.appendChild(input);
     input.addEventListener('change', () => {
       const file = input.files?.[0];
+      cleanup();
       if (file) onFile(file);
     });
+    // The dialog steals the focus while it is open; when the window gets it
+    // back — selection made or cancelled — the throwaway input is removed.
+    const cleanup = (): void => {
+      window.removeEventListener('focus', cleanup);
+      input.remove();
+    };
+    window.addEventListener('focus', cleanup);
     input.click();
   }
 

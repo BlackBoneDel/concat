@@ -9,6 +9,13 @@
  * Fase 4: folder and subtitle import, proxy badge ("P") with progress,
  * offline state (click to relink) and a context menu with proxy, metadata,
  * relink and OPFS actions.
+ *
+ * Import bulletproofing: every import button opens the one global picker
+ * (attached to `document.body`, see `global-file-input.ts`), the drop zone
+ * stops propagation so the window-wide capture does not import the same
+ * files twice, and a card exists from the first millisecond — while its
+ * metadata is being probed it shows a spinner ("Procesando…"), and if the
+ * probe fails it stays with its placeholder thumbnail instead of vanishing.
  */
 
 import { icon } from './components/icons.ts';
@@ -17,6 +24,8 @@ import type { AppContext } from './app-context.ts';
 import { formatDuration } from '../player/timecode.ts';
 import { getMediaTools } from './media-tools.ts';
 import { showContextMenu, showMetadataDialog } from './media-context-menu.ts';
+import { openGlobalFilePicker } from './global-file-input.ts';
+import { markDropHandled } from './timeline/file-drop.ts';
 
 /** Subtitle extensions routed to the subtitle importer on drop. */
 const SUBTITLE_FILE = /\.(srt|vtt)$/i;
@@ -86,6 +95,10 @@ export class MediaPanel {
     drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
     drop.addEventListener('drop', (event) => {
       event.preventDefault();
+      // The panel owns this drop: it must not reach the window-wide capture
+      // (which would import the same files a second time).
+      event.stopPropagation();
+      markDropHandled(event);
       drop.classList.remove('drag-over');
       const files = [...(event.dataTransfer?.files ?? [])];
       const subtitles = files.filter((file) => SUBTITLE_FILE.test(file.name));
@@ -110,14 +123,18 @@ export class MediaPanel {
     }
   }
 
-  /** Opens the file picker. */
+  /**
+   * Opens the media picker: the global input (attached to `document.body`,
+   * so `change` fires everywhere) when it is installed, and a throwaway one
+   * only as a fallback for a context that never installed it.
+   */
   openPicker(): void {
-    const input = document.createElement('input');
-    input.type = 'file';
-    input.multiple = true;
-    input.accept = 'video/*,audio/*,image/*';
+    if (openGlobalFilePicker()) return;
+    const input = this.attachPicker();
+    input.accept = 'video/*,audio/*,image/*,.mp4,.mkv,.mov,.webm,.avi,.wav,.mp3,.png,.jpg,.jpeg';
     input.addEventListener('change', () => {
       const files = [...(input.files ?? [])];
+      input.remove();
       if (files.length > 0) void this.ctx.importFiles(files);
     });
     input.click();
@@ -125,22 +142,50 @@ export class MediaPanel {
 
   /** Opens the subtitle picker (Fase 4). */
   openSubtitlePicker(): void {
-    const input = document.createElement('input');
-    input.type = 'file';
+    const input = this.attachPicker();
     input.accept = '.srt,.vtt,text/vtt,application/x-subrip';
+    input.multiple = false;
     input.addEventListener('change', () => {
       const file = input.files?.[0];
+      input.remove();
       if (file) void getMediaTools()?.importSubtitles(file);
     });
     input.click();
+  }
+
+  /**
+   * A file input that is really in the document: an input that was only
+   * created in memory does not fire `change` in several mobile and desktop
+   * browsers, which is why the import used to "do nothing" there.
+   */
+  private attachPicker(): HTMLInputElement {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.multiple = true;
+    input.hidden = true;
+    input.setAttribute('aria-hidden', 'true');
+    input.setAttribute('style', 'position:fixed;top:-9999px;left:-9999px;width:1px;height:1px;opacity:0;pointer-events:none;');
+    document.body.appendChild(input);
+    // The file dialog takes the focus while it is open; when the window gets
+    // it back — selection made or cancelled — the throwaway input goes away.
+    const cleanup = (): void => {
+      window.removeEventListener('focus', cleanup);
+      input.remove();
+    };
+    window.addEventListener('focus', cleanup);
+    return input;
   }
 
   /** One library card. */
   private card(asset: MediaAsset): HTMLElement {
     const card = document.createElement('button');
     card.type = 'button';
-    card.className = `media-card${this.selectedId === asset.id ? ' selected' : ''}`;
-    card.title = `${asset.name} — doble clic añade al timeline`;
+    const processing = asset.status === 'processing';
+    card.className = `media-card${this.selectedId === asset.id ? ' selected' : ''}${processing ? ' processing' : ''}`;
+    card.dataset['status'] = asset.status;
+    card.title = processing
+      ? `${asset.name} — importando…`
+      : `${asset.name} — doble clic añade al timeline`;
 
     const thumbWrap = document.createElement('div');
     thumbWrap.className = 'media-thumb';
@@ -154,6 +199,15 @@ export class MediaPanel {
       // Fase 7 hook: SVG glyph for audio-only assets.
       thumbWrap.appendChild(icon('music', { size: 28, className: 'media-thumb-icon' }));
     }
+    // Import in flight: a spinner over the (placeholder) thumbnail, so the
+    // user sees the file was taken the instant it was dropped.
+    if (processing) {
+      const spinner = document.createElement('div');
+      spinner.className = 'media-spinner';
+      spinner.setAttribute('role', 'progressbar');
+      spinner.setAttribute('aria-label', `Importando ${asset.name}`);
+      thumbWrap.appendChild(spinner);
+    }
     card.appendChild(thumbWrap);
 
     const meta = document.createElement('div');
@@ -163,12 +217,22 @@ export class MediaPanel {
     name.textContent = asset.name;
     const detail = document.createElement('div');
     detail.className = 'media-detail';
-    detail.textContent =
-      asset.type === 'image'
+    detail.textContent = processing
+      ? 'Procesando…'
+      : asset.type === 'image'
         ? `${asset.width}×${asset.height}`
         : `${formatDuration(asset.duration)} · ${asset.width}×${asset.height}`;
     meta.appendChild(name);
     meta.appendChild(detail);
+    if (asset.status === 'error') {
+      // The card stays: the file is in the library even when nothing could be
+      // read from it, and the note says why.
+      const note = document.createElement('div');
+      note.className = 'media-status-note';
+      note.textContent = 'Metadatos provisionales';
+      if (asset.statusMessage) note.title = asset.statusMessage;
+      meta.appendChild(note);
+    }
     card.appendChild(meta);
 
     const remove = document.createElement('span');

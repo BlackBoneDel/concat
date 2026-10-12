@@ -73,7 +73,28 @@ async function networkFirst(request) {
 self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET' || request.headers.has('range')) return;
-  const url = new URL(request.url);
-  if (url.origin !== self.location.origin) return;
+  // Import bulletproofing: never touch the browser's own local schemes.
+  // An import hands the pool `blob:` URLs (`URL.createObjectURL`) for
+  // thumbnails, decoded media and the fallback `<video>` elements, plus the
+  // occasional `data:`/`file:` URL and the dev-tool sockets. A service
+  // worker that answers those fails CORS and can break `createObjectURL`
+  // media entirely, so they are passed straight through to the browser.
+  const raw = request.url;
+  if (
+    raw.startsWith('blob:') ||
+    raw.startsWith('data:') ||
+    raw.startsWith('file:') ||
+    raw.includes('chrome-extension:')
+  ) {
+    return;
+  }
+  let url;
+  try {
+    url = new URL(raw);
+  } catch {
+    return;
+  }
+  // Only our own origin, over http(s): no data:/blob: can reach the caches.
+  if (url.origin !== self.location.origin || (url.protocol !== 'http:' && url.protocol !== 'https:')) return;
   event.respondWith(networkFirst(request));
 });
