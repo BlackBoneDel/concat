@@ -1,0 +1,109 @@
+/* SPDX-License-Identifier: AGPL-3.0-or-later */
+/* SPDX-FileCopyrightText: 2026 Jareer and Concat contributors */
+
+/* Base shell styles for the Fase 1 boot screen. The full editor chrome lands
+   with the UI phases; this keeps the report readable and honest. */
+
+:root {
+  color-scheme: dark;
+  --bg: #101014;
+  --panel: #17171d;
+  --panel-edge: #26262e;
+  --text: #e8e8ee;
+  --text-dim: #9a9aa6;
+  --accent: #4f8cff;
+  --ok: #3ecf8e;
+  --font-ui: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  --font-mono: "JetBrains Mono", "Fira Code", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-ui);
+  line-height: 1.5;
+}
+
+.app-header {
+  display: flex;
+  align-items: baseline;
+  gap: 0.75rem;
+  padding: 1.25rem 1.5rem;
+  border-bottom: 1px solid var(--panel-edge);
+  flex-wrap: wrap;
+}
+
+.app-header .logo {
+  align-self: center;
+}
+
+.app-header h1 {
+  margin: 0;
+  font-size: 1.35rem;
+  letter-spacing: -0.01em;
+}
+
+.edition {
+  font-size: 0.85rem;
+  font-weight: 500;
+  color: var(--text-dim);
+}
+
+.tagline {
+  margin: 0;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+}
+
+main {
+  flex: 1;
+  padding: 1.5rem;
+  max-width: 60rem;
+  width: 100%;
+  margin: 0 auto;
+}
+
+.card {
+  background: var(--panel);
+  border: 1px solid var(--panel-edge);
+  border-radius: 12px;
+  padding: 1.25rem 1.5rem;
+}
+
+.card h2 {
+  margin: 0 0 0.75rem;
+  font-size: 1.05rem;
+}
+
+#report-body {
+  font-family: var(--font-mono);
+  font-size: 0.85rem;
+  white-space: pre-wrap;
+}
+
+#report-body .ok {
+  color: var(--ok);
+}
+
+#report-body .dim {
+  color: var(--text-dim);
+}
+
+.app-footer {
+  padding: 1rem 1.5rem;
+  border-top: 1px solid var(--panel-edge);
+  color: var(--text-dim);
+  font-size: 0.85rem;
+}
+
+.app-footer a {
+  color: var(--accent);
+}

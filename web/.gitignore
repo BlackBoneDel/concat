@@ -1,0 +1,4 @@
+# Node tooling — nothing here ships with the app
+node_modules/
+dist/
+.vite/

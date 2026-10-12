@@ -1,0 +1,21 @@
+{
+  "name": "concat-web",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Concat — the open-source video editor, now as a 100% local web app. Fase 1: core model and project schema.",
+  "license": "AGPL-3.0-or-later",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vitest": "^2.1.8"
+  }
+}

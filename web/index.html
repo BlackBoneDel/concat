@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Concat — Web (Fase 1: core model)</title>
+    <link rel="stylesheet" href="./src/styles.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <img class="logo" alt="" width="28" height="28" src="./src/assets/concat-mark.png" />
+      <h1>Concat <span class="edition">Web · Fase 1</span></h1>
+      <p class="tagline">The open-source video editor, running 100% in your browser.</p>
+    </header>
+
+    <main id="app" aria-live="polite">
+      <section class="card" id="model-report">
+        <h2>Core model</h2>
+        <div id="report-body">Booting…</div>
+      </section>
+    </main>
+
+    <footer class="app-footer">
+      <p>
+        Port of <a href="https://github.com/jub0t/Concat">jub0t/Concat</a> · AGPL-3.0-or-later ·
+        Everything here runs locally; nothing is uploaded.
+      </p>
+    </footer>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
