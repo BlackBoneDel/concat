@@ -2,181 +2,462 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 /**
- * Fase 1 boot screen.
- *
- * Builds a project with the core model, edits it the way the engine would,
- * round-trips it through the `concat.json` document schema, and reports what
- * happened. This is the model proving itself in the browser — the editor
- * canvas, timeline and media pipeline arrive with Fases 2–6.
+ * The application: wires session, media pool, player, storage and the shell
+ * together, and owns the app-level flows (import, save/open, autosave,
+ * shortcuts). Everything runs against local storage — no network, no
+ * telemetry.
  */
 
+import { Rational } from './core/rational.ts';
+import { FrameRate } from './core/time.ts';
+import type { MediaItem } from './model/document.ts';
+import { createProjectDocument } from './model/document.ts';
+import { MediaPool } from './media/media-pool.ts';
+import { PreviewPlayer } from './player/player.ts';
+import type { RenderContext2D, RenderTarget } from './render/types.ts';
+import { EditorSession } from './session/editor-session.ts';
+import { History } from './session/history.ts';
+import { MediaStore } from './storage/media-store.ts';
+import { ProjectStore } from './storage/project-store.ts';
+import { MemoryKeyValue, openKeyValue } from './storage/idb.ts';
+import { loadSettings, saveSettings as persistSettings, type UserSettings } from './storage/settings-store.ts';
 import {
-  Blend,
-  Clip,
-  FrameRate,
-  MediaRef,
-  Project,
-  Rational,
-  SpeedCurve,
-  Timeline,
-  Track,
-  TrackKind,
-} from './core/index.ts';
-import {
-  createProjectDocument,
-  documentSettingsVideo,
-  fromDocument,
-  toDocument,
-  blankClip,
-  type DocumentSettings,
-} from './model/index.ts';
+  HeaderBar,
+  InspectorPanel,
+  KeyboardShortcuts,
+  MediaPanel,
+  Notifications,
+  PreviewPanel,
+  ThemeManager,
+  TimelinePanel,
+  createEditorLayout,
+  type AppContext,
+} from './ui/index.ts';
 
-/** Builds a small three-clip timeline through the engine model. */
-function buildEngineProject(): Project {
-  const timeline = new Timeline(1920, 1080, FrameRate.THIRTY);
-  const videoLane = timeline.addTrack(new Track('V1', TrackKind.Video));
-  const audioLane = timeline.addTrack(new Track('A1', TrackKind.Audio));
+/** A render target that finds its canvas once the panel has built it. */
+class CanvasRef implements RenderTarget {
+  private canvas: HTMLCanvasElement | null = null;
 
-  // 0s..3s of footage, then a two-second overlap with a fade — the shape a
-  // cross-dissolve takes in the engine model.
-  const intro = new Clip(new MediaRef('footage/intro.mp4'), Rational.fromInt(0n), Rational.fromInt(3n));
-  const bRoll = new Clip(new MediaRef('footage/broll.mp4'), Rational.fromInt(2n), Rational.fromInt(3n), {
-    videoFadeIn: Rational.new(1n, 2n),
-    blend: Blend.Normal,
-    opacity: 1,
-  });
-  const music = new Clip(new MediaRef('audio/theme.mp3'), Rational.fromInt(0n), Rational.fromInt(6n), {
-    sourceStart: Rational.new(10n, 1n),
-    speed: Rational.ONE,
-    retime: SpeedCurve.new([
-      [0, 1],
-      [1, 1],
-    ]),
-    hold: false,
-  });
+  /** Points the ref at the real canvas. */
+  attach(canvas: HTMLCanvasElement): void {
+    this.canvas = canvas;
+  }
 
-  timeline.addClip(videoLane, intro);
-  timeline.addClip(videoLane, bRoll);
-  timeline.addClip(audioLane, music);
-  return new Project('Fase 1 demo', timeline);
+  get width(): number {
+    return this.canvas?.width ?? 640;
+  }
+
+  get height(): number {
+    return this.canvas?.height ?? 360;
+  }
+
+  getContext(type: '2d'): RenderContext2D | null {
+    return this.canvas?.getContext(type) ?? null;
+  }
 }
 
-/** Puts the same edit through the document schema and reads it back. */
-function roundTripDocument(): { json: unknown; reopened: ReturnType<typeof fromDocument> } {
-  const settings: DocumentSettings = {
-    name: 'Fase 1 demo',
-    width: 1920,
-    height: 1080,
-    rateNum: 30,
-    rateDen: 1,
-  };
-  const project = createProjectDocument(documentSettingsVideo(settings));
-  const timeline = project.timelines[0]!;
-  timeline.clips.push(
-    { ...blankClip('c1', 'T1', 'video', 'intro', 0, 3), mediaId: 'm1' },
-    { ...blankClip('c2', 'T1', 'video', 'broll', 2, 3), mediaId: 'm2', fadeIn: 0.5 },
-  );
-  project.media.push({
-    id: 'm1',
-    path: 'footage/intro.mp4',
-    name: 'intro.mp4',
-    duration: 12,
-    kind: 'video',
-    width: 1920,
-    height: 1080,
-    frameRate: 30,
-    frameRateFraction: '30/1',
-    videoCodec: 'h264',
-    audioCodec: 'aac',
-    hasAudio: true,
-    audioTracks: [],
-    slot: false,
-    origin: null,
-    colorRange: null,
-    colorSpace: 'sdr',
-    extra: {},
-  });
-  project.media.push({
-    id: 'm2',
-    path: 'footage/broll.mp4',
-    name: 'broll.mp4',
-    duration: 9,
-    kind: 'video',
-    width: 1920,
-    height: 1080,
-    frameRate: 30,
-    frameRateFraction: '30/1',
-    videoCodec: 'h264',
-    audioCodec: null,
-    hasAudio: false,
-    audioTracks: [],
-    slot: false,
-    origin: null,
-    colorRange: null,
-    colorSpace: 'sdr',
-    extra: {},
-  });
+/** The editor application. */
+class EditorApp implements AppContext {
+  session = new EditorSession();
+  player: PreviewPlayer;
+  pool = new MediaPool();
+  mediaStore: MediaStore;
+  projectStore: ProjectStore;
+  history = new History();
+  notifications: Notifications;
+  theme: ThemeManager;
+  shortcuts = new KeyboardShortcuts();
+  settings: UserSettings = loadSettings();
+  projectId: string | null = null;
+  selectedClipId: string | null = null;
 
-  const json = toDocument(settings, project);
-  return { json, reopened: fromDocument(json) };
-}
+  private readonly canvasRef = new CanvasRef();
+  private header: HeaderBar | null = null;
+  private timelinePanel: TimelinePanel | null = null;
+  private mediaPanel: MediaPanel | null = null;
+  private inspectorPanel: InspectorPanel | null = null;
+  private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  private autosaveTimer: ReturnType<typeof setInterval> | null = null;
 
-/** Renders the report into the page. */
-function report(): string {
-  const lines: string[] = [];
+  constructor() {
+    this.mediaStore = new MediaStore(new MemoryKeyValue());
+    this.projectStore = new ProjectStore(new MemoryKeyValue());
+    this.notifications = new Notifications(document.createElement('div'));
+    this.theme = new ThemeManager(document.documentElement);
+    this.player = new PreviewPlayer({
+      canvas: this.canvasRef,
+      session: this.session,
+      mediaPool: this.pool,
+      audioContext: null,
+    });
+  }
 
-  const project = buildEngineProject();
-  const { timeline } = project;
-  const duration = timeline.duration();
-  const seconds = duration.asNumber();
+  /** Boots the shell and the services. */
+  async start(): Promise<void> {
+    // Theme + notifications.
+    this.theme.apply(this.settings.theme);
+    const toastStack = document.createElement('div');
+    toastStack.id = 'toast-stack';
+    document.body.appendChild(toastStack);
+    this.notifications = new Notifications(toastStack);
+    this.notifications.setEnabled(this.settings.showTooltips);
 
-  lines.push(`project        ${project.name}`);
-  lines.push(`frame          ${timeline.width}x${timeline.height} @ ${timeline.frame_rate.toString()}`);
-  lines.push(`tracks         ${timeline.trackIds().length}`);
-  lines.push(`clips          ${timeline.clipCount()}`);
-  lines.push(`duration       ${duration.toString()} s (${seconds.toFixed(3)})`);
-  lines.push(`frames         ${timeline.frameCount()}`);
+    // Storage backends (real IndexedDB + OPFS when available).
+    const mediaBackend = await openKeyValue('ConcatMediaDB', ['files']);
+    this.mediaStore = new MediaStore(mediaBackend);
+    const projectBackend = await openKeyValue('ConcatProjectDB', ['projects']);
+    this.projectStore = new ProjectStore(projectBackend);
 
-  // The affine map every trim and retime agrees on, proven at 1.5 s.
-  const at = Rational.new(3n, 2n);
-  const firstLane = timeline.trackIds()[0]!;
-  const clipId = timeline.clipOnTrackAt(firstLane, at);
-  const clip = clipId ? timeline.clip(clipId) : undefined;
-  if (clip) {
-    const source = clip.sourceTimeAt(at);
-    lines.push(
-      `source time    t=3/2 → ${source ? `${source.toString()} s in ${clip.media.path}` : 'none'}`,
+    // Audio: a live context (starts suspended until the first play).
+    let audioContext: AudioContext | null = null;
+    try {
+      audioContext = new AudioContext();
+    } catch {
+      audioContext = null;
+    }
+    this.player = new PreviewPlayer({
+      canvas: this.canvasRef,
+      session: this.session,
+      mediaPool: this.pool,
+      audioContext,
+    });
+
+    // The shell.
+    const root = document.getElementById('app');
+    if (!root) throw new Error('#app missing');
+    const layout = createEditorLayout(root, this);
+    this.header = new HeaderBar(layout.header, this);
+    this.mediaPanel = new MediaPanel(layout.mediaPanel, this);
+    const preview = new PreviewPanel(layout.previewPanel, this);
+    this.canvasRef.attach(preview.renderCanvas);
+    this.timelinePanel = new TimelinePanel(layout.timelinePanel, this);
+    this.inspectorPanel = new InspectorPanel(layout.inspectorPanel, this);
+
+    // Shortcuts.
+    this.wireShortcuts();
+    this.shortcuts.setEnabled(true);
+
+    // App-level events.
+    document.addEventListener('open-import', () => this.mediaPanel?.openPicker());
+    document.addEventListener('session-reset', () => {
+      this.session.document = createProjectDocument();
+      this.session.name = 'Untitled';
+      this.session.rebuild();
+      this.session.dirty = false;
+      this.projectId = null;
+      this.selectedClipId = null;
+      this.refreshAll();
+    });
+    document.addEventListener('timeline-changed', () => {
+      this.timelinePanel?.refresh();
+      this.inspectorPanel?.refresh();
+    });
+    document.addEventListener('selection-changed', () => {
+      this.inspectorPanel?.refresh();
+    });
+    document.addEventListener('preview-quality-changed', () => {
+      this.requestRender();
+    });
+
+    // Autosave on the configured interval.
+    this.armAutosave();
+
+    // Restore the media library from OPFS.
+    await this.restoreMediaLibrary();
+
+    // OPFS status line.
+    if (!(await this.mediaStore.hasOpfs())) {
+      this.notifications.warning(
+        'Almacenamiento limitado',
+        'Este navegador no permite OPFS: los archivos se conservarán solo durante esta sesión.',
+      );
+    }
+
+    this.refreshAll();
+    void this.player.renderOnce();
+  }
+
+  // -- AppContext ----------------------------------------------------------
+
+  async importFiles(files: File[]): Promise<void> {
+    for (const file of files) {
+      const id = crypto.randomUUID();
+      try {
+        const asset = await this.pool.addMedia(file, id, file.name);
+        const decoder = this.pool.getDecoder(id);
+        const info = decoder?.mediaInfo;
+        if (info) {
+          await this.mediaStore.importFile(file, info, id, file.name);
+        }
+        this.session.addMediaItem(this.toMediaItem(asset.id, asset.name, asset));
+        this.notifications.success('Medio importado', asset.name);
+      } catch (error) {
+        this.notifications.error('Error al importar', `${file.name}: ${describe(error)}`);
+      }
+    }
+    document.dispatchEvent(new CustomEvent('media-library-changed'));
+    this.requestAutosave();
+  }
+
+  async saveProject(): Promise<void> {
+    try {
+      const record = await this.projectStore.saveProject(
+        this.session.document,
+        this.session.documentSettings(),
+        this.projectId ?? undefined,
+      );
+      this.projectId = record.id;
+      this.session.dirty = false;
+      this.header?.markSaved();
+    } catch (error) {
+      this.notifications.error('Error al guardar', describe(error));
+    }
+  }
+
+  async openProject(id: string): Promise<void> {
+    const loaded = await this.projectStore.loadProject(id);
+    if (!loaded) {
+      this.notifications.error('Error al cargar', 'El proyecto no existe o está dañado.');
+      return;
+    }
+    this.history.clear();
+    this.session.document = loaded.document;
+    this.session.name = loaded.name;
+    this.session.rebuild();
+    this.session.dirty = false;
+    this.projectId = id;
+    this.selectedClipId = null;
+    this.refreshAll();
+    this.requestRender();
+    this.notifications.success('Proyecto abierto', loaded.name);
+  }
+
+  addMediaToTimeline(mediaId: string): void {
+    this.history.push(this.session.document, this.session.documentSettings());
+    const clip = this.session.addClipAt(mediaId, this.player.currentTime);
+    this.selectedClipId = clip.id;
+    this.refreshAll();
+    this.requestRender();
+    this.requestAutosave();
+  }
+
+  selectClip(docClipId: string | null): void {
+    this.selectedClipId = docClipId;
+    document.dispatchEvent(new CustomEvent('selection-changed'));
+  }
+
+  requestRender(): void {
+    if (this.renderTimer !== null) clearTimeout(this.renderTimer);
+    this.renderTimer = setTimeout(() => {
+      this.renderTimer = null;
+      void this.player.renderOnce();
+    }, 16);
+  }
+
+  requestAutosave(): void {
+    // Autosave fires on the interval; the flag marks the document dirty.
+    this.session.dirty = true;
+    this.header?.sync();
+  }
+
+  saveSettings(): void {
+    persistSettings(this.settings);
+  }
+
+  // -- internals -----------------------------------------------------------
+
+  private wireShortcuts(): void {
+    const ctx = this;
+    this.shortcuts.bindAction('play', () => {
+      if (ctx.player.isPlaying) ctx.player.pause();
+      else ctx.player.play();
+    });
+    this.shortcuts.bindAction('save', () => void ctx.saveProject());
+    this.shortcuts.bindAction('import', () => ctx.mediaPanel?.openPicker());
+    this.shortcuts.bindAction('delete', () => {
+      const id = ctx.selectedClipId;
+      if (!id) return;
+      ctx.history.push(ctx.session.document, ctx.session.documentSettings());
+      ctx.session.removeClip(id);
+      ctx.selectedClipId = null;
+      ctx.refreshAll();
+      ctx.requestRender();
+      ctx.requestAutosave();
+    });
+    this.shortcuts.bindAction('cut', () => ctx.splitAtPlayhead());
+    this.shortcuts.bindAction('duplicate', () => ctx.duplicateSelection());
+    this.shortcuts.bindAction('undo', () => {
+      const restored = ctx.history.undo(ctx.session.document, ctx.session.documentSettings());
+      if (restored) {
+        ctx.session.document = restored;
+        ctx.session.rebuild();
+        ctx.session.dirty = true;
+        ctx.refreshAll();
+        ctx.requestRender();
+      }
+    });
+    this.shortcuts.bindAction('redo', () => {
+      const restored = ctx.history.redo(ctx.session.document, ctx.session.documentSettings());
+      if (restored) {
+        ctx.session.document = restored;
+        ctx.session.rebuild();
+        ctx.session.dirty = true;
+        ctx.refreshAll();
+        ctx.requestRender();
+      }
+    });
+    this.shortcuts.bindAction('nextFrame', () => ctx.player.stepForward());
+    this.shortcuts.bindAction('prevFrame', () => ctx.player.stepBackward());
+    this.shortcuts.bindAction('goStart', () => ctx.player.seekTo(Rational.ZERO));
+    this.shortcuts.bindAction('goEnd', () => ctx.player.seekTo(ctx.session.duration()));
+    this.shortcuts.bindAction('zoomIn', () => ctx.timelinePanel?.zoomIn());
+    this.shortcuts.bindAction('zoomOut', () => ctx.timelinePanel?.zoomOut());
+    this.shortcuts.bindAction('zoomFit', () => ctx.timelinePanel?.zoomFit());
+  }
+
+  /** Ctrl+K: splits the clip under the playhead. */
+  splitAtPlayhead(): void {
+    const at = this.player.currentTime.asNumber();
+    const timeline = this.session.timeline;
+    const clip = timeline.clips.find(
+      (item) => item.start < at && at < item.start + item.duration,
     );
-    lines.push(`fade factor    ${clip.videoFadeFactor(at).toFixed(3)}`);
+    if (!clip) {
+      this.notifications.info('Nada que cortar', 'Coloca el playhead sobre un clip.');
+      return;
+    }
+    this.history.push(this.session.document, this.session.documentSettings());
+    const headDuration = at - clip.start;
+    const tailDuration = clip.duration - headDuration;
+    if (headDuration <= 0 || tailDuration <= 0) return;
+    const tail = structuredClone(clip);
+    tail.id = nextClipId(timeline.clips.map((item) => item.id));
+    tail.start = at;
+    tail.duration = tailDuration;
+    tail.sourceStart = clip.sourceStart + headDuration * clip.speed;
+    clip.duration = headDuration;
+    timeline.clips.push(tail);
+    this.session.rebuild();
+    this.session.dirty = true;
+    this.refreshAll();
+    this.requestRender();
+    this.requestAutosave();
   }
 
-  const { json, reopened } = roundTripDocument();
-  const text = JSON.stringify(json);
-  lines.push('');
-  lines.push(`document       concat.json written (${text.length} bytes)`);
-  if (reopened) {
-    const reopenedTimeline = reopened.timelines[0]!;
-    const clipList = reopenedTimeline.clips.map((entry) => entry.id).join(', ');
-    lines.push(`<span class="ok">reopen         ok</span> — ${reopened.media.length} media, clips: [${clipList}]`);
-    lines.push(`<span class="dim">settle kept every clip whose track and media exist; numbers were tidied.</span>`);
-  } else {
-    lines.push('reopen         FAILED');
+  /** Ctrl+D: duplicates the selection after the original. */
+  duplicateSelection(): void {
+    const id = this.selectedClipId;
+    const timeline = this.session.timeline;
+    const clip = timeline.clips.find((item) => item.id === id);
+    if (!clip) return;
+    this.history.push(this.session.document, this.session.documentSettings());
+    const copy = structuredClone(clip);
+    copy.id = nextClipId(timeline.clips.map((item) => item.id));
+    copy.start = clip.start + clip.duration;
+    timeline.clips.push(copy);
+    this.selectedClipId = copy.id;
+    this.session.rebuild();
+    this.session.dirty = true;
+    this.refreshAll();
+    this.requestRender();
+    this.requestAutosave();
   }
 
-  return lines.join('\n');
+  private armAutosave(): void {
+    if (this.autosaveTimer !== null) clearInterval(this.autosaveTimer);
+    this.autosaveTimer = setInterval(() => {
+      if (this.session.dirty) void this.saveProjectSilently();
+    }, Math.max(5, this.settings.autosaveInterval) * 1000);
+  }
+
+  private async saveProjectSilently(): Promise<void> {
+    try {
+      const record = await this.projectStore.saveProject(
+        this.session.document,
+        this.session.documentSettings(),
+        this.projectId ?? undefined,
+      );
+      this.projectId = record.id;
+      this.session.dirty = false;
+      this.header?.sync();
+    } catch {
+      // Autosave is best-effort; Ctrl+S surfaces errors.
+    }
+  }
+
+  /** Rebuilds every panel from the session. */
+  private refreshAll(): void {
+    this.mediaPanel?.refresh();
+    this.timelinePanel?.refresh();
+    this.inspectorPanel?.refresh();
+    this.header?.sync();
+    document.dispatchEvent(new CustomEvent('media-library-changed'));
+  }
+
+  /** Loads the persisted media back into the pool at boot. */
+  private async restoreMediaLibrary(): Promise<void> {
+    const records = await this.mediaStore.list();
+    for (const record of records) {
+      const blob = await this.mediaStore.readFile(record.id);
+      if (!blob) continue;
+      await this.pool.addMedia(blob, record.id, record.name);
+    }
+    if (records.length > 0) {
+      this.notifications.info('Biblioteca restaurada', `${records.length} medios disponibles.`);
+      document.dispatchEvent(new CustomEvent('media-library-changed'));
+    }
+  }
+
+  /** A bin entry from an imported asset. */
+  private toMediaItem(id: string, name: string, asset: { type: string; duration: Rational; width: number; height: number; fps: FrameRate; codec: string }): MediaItem {
+    return {
+      id,
+      path: `media/${id}`,
+      name,
+      duration: asset.duration.asNumber(),
+      kind: asset.type === 'image' ? 'image' : asset.type === 'audio' ? 'audio' : 'video',
+      width: asset.width > 0 ? asset.width : null,
+      height: asset.height > 0 ? asset.height : null,
+      frameRate: asset.fps.fps().asNumber(),
+      frameRateFraction: asset.fps.fps().toString(),
+      videoCodec: asset.codec !== '' ? asset.codec : null,
+      audioCodec: null,
+      hasAudio: asset.type !== 'image',
+      audioTracks: [],
+      slot: false,
+      origin: null,
+      colorRange: null,
+      colorSpace: 'sdr',
+      extra: {},
+    };
+  }
 }
 
-function boot(): void {
-  // The model is importable outside a browser (tests, tooling); only the
-  // report needs a DOM.
-  if (typeof document === 'undefined') return;
-  const body = document.getElementById('report-body');
-  if (!body) return;
-  try {
-    body.innerHTML = report();
-  } catch (error) {
-    body.textContent = `Boot failed: ${error instanceof Error ? error.message : String(error)}`;
+/** The next free clip id in the `c1`, `c2`, … series. */
+function nextClipId(existing: string[]): string {
+  let counter = existing.length + 1;
+  let id = `c${counter}`;
+  while (existing.includes(id)) {
+    counter += 1;
+    id = `c${counter}`;
   }
+  return id;
 }
 
-boot();
+/** A readable message from an unknown thrown value. */
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+// -- boot ------------------------------------------------------------------
+
+const app = new EditorApp();
+void app.start().catch((error) => {
+  const banner = document.createElement('div');
+  banner.className = 'boot-error';
+  banner.textContent = `Concat no pudo iniciar: ${describe(error)}`;
+  document.body.appendChild(banner);
+});
+
+// The running instance, for tests and the browser console.
+export { app, EditorApp };
