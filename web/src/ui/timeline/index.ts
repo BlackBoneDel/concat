@@ -35,6 +35,13 @@ export {
 } from '../dnd/media-drag.ts';
 export { markDropHandled, wasDropHandled } from '../dnd/drop-handled.ts';
 export {
+  buildTextClip,
+  insertTextClipOperation,
+  DEFAULT_TEXT_CONTENT,
+  DEFAULT_TEXT_DURATION,
+  type TextClipOptions,
+} from './add-text.ts';
+export {
   getTrackAtY,
   layoutRects,
   layoutToRect,

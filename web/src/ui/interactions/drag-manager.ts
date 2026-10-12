@@ -62,10 +62,17 @@ export interface DragManagerOptions {
   onPreview(): void;
   /** Asks the host to open a context menu. */
   onContextMenu(x: number, y: number, clipId: string | null): void;
+  /**
+   * Fase 8: scrolls the viewport by a pointer delta — the hand tool drags the
+   * timeline around. Omitted by hosts that do not scroll (tests).
+   * @param deltaX horizontal pointer movement, in pixels.
+   * @param deltaY vertical pointer movement, in pixels.
+   */
+  pan?(deltaX: number, deltaY: number): void;
 }
 
 /** Who owns the current pointer gesture. */
-type DragKind = 'none' | 'clip' | 'trim-in' | 'trim-out' | 'marquee' | 'marker' | 'playhead' | 'keyframe' | 'curve';
+type DragKind = 'none' | 'clip' | 'trim-in' | 'trim-out' | 'marquee' | 'marker' | 'playhead' | 'keyframe' | 'curve' | 'pan';
 
 /** The timeline's pointer controller. */
 export class DragManager {
@@ -86,6 +93,8 @@ export class DragManager {
   private gestureDoc: ProjectDocument | null = null;
   /** Fase 7: gestures cancelled because the document changed underneath. */
   private externalCancels = 0;
+  /** Fase 8: last pointer position of a hand-tool pan. */
+  private panFrom: { x: number; y: number } | null = null;
 
   /**
    * @param options host wiring.
@@ -212,6 +221,13 @@ export class DragManager {
     this.gestureDoc = this.options.history.currentDoc;
     const tool = this.options.tool();
     const shift = event.shiftKey;
+    // Fase 8: the hand tool owns the whole surface — it only scrolls.
+    if (tool === 'hand' && this.options.pan) {
+      this.dragKind = 'pan';
+      this.panFrom = { x, y };
+      this.options.onPreview();
+      return;
+    }
     const ctrl = event.ctrlKey || event.metaKey;
     if (y <= this.options.view.rulerHeight) {
       // Ruler: marker grab or playhead/scrub.
@@ -288,6 +304,15 @@ export class DragManager {
     if (!this.pointerDown) return;
     if (this.syncWithHistory()) return;
     switch (this.dragKind) {
+      case 'pan': {
+        const from = this.panFrom;
+        if (from) {
+          this.options.pan?.(x - from.x, y - from.y);
+          this.panFrom = { x, y };
+        }
+        this.options.onPreview();
+        break;
+      }
       case 'keyframe':
         this.keyframeDrag.update(x, y, {
           playheadSeconds: this.options.playheadSeconds(),
@@ -339,6 +364,7 @@ export class DragManager {
     if (this.syncWithHistory()) return;
     this.pointerDown = false;
     this.gestureDoc = null;
+    this.panFrom = null;
     const shift = event.shiftKey;
     switch (this.dragKind) {
       case 'keyframe': {

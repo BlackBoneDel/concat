@@ -171,6 +171,9 @@ export function installKeyboardShortcuts(
       case 'p':
         actions.setTool('pen');
         break;
+      case 'h':
+        actions.setTool('hand');
+        break;
       case 's':
         actions.toggleSnapping();
         break;

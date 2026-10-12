@@ -16,6 +16,7 @@ import { Modal } from './modal.ts';
 import type { AppContext } from './app-context.ts';
 import markUrl from '../assets/concat-mark.png';
 import { getMediaTools } from './media-tools.ts';
+import { showContextMenu } from './media-context-menu.ts';
 import { getProductionServices } from './production-services.ts';
 import { icon, iconButton, setButtonIcon, type IconName } from './components/icons.ts';
 
@@ -74,6 +75,8 @@ export class HeaderBar {
     menus.className = 'header-menus';
     menus.appendChild(this.menuButton('Archivo', () => this.openFileMenu(), 'menu'));
     menus.appendChild(this.menuButton('Edición', () => this.openEditMenu(), 'pen'));
+    // Fase 8: Ver (paneles y zoom) entre Edición y Ajustes, como en CapCut.
+    menus.appendChild(this.menuButton('Ver', () => this.openViewMenu(), 'panelLeft'));
     menus.appendChild(this.menuButton('Ajustes', () => this.openSettingsModal(), 'settings'));
     // Fase 6 hook: the searchable shortcut sheet when installed.
     menus.appendChild(this.menuButton('Atajos', () => {
@@ -89,6 +92,9 @@ export class HeaderBar {
     this.projectName = document.createElement('span');
     this.projectName.className = 'header-project';
     this.projectName.textContent = this.ctx.session.name;
+    // Fase 8: el nombre del proyecto se edita en el sitio.
+    this.projectName.classList.add('is-editable');
+    this.projectName.addEventListener('click', () => this.renameProjectInline());
     identity.appendChild(this.projectName);
     this.saveState = document.createElement('span');
     this.saveState.className = 'header-save-state';
@@ -128,6 +134,15 @@ export class HeaderBar {
     });
     actions.appendChild(this.themeButton);
     this.syncThemeIcon();
+    // Fase 8: Ajustes y el conmutador de paneles, como iconos.
+    actions.appendChild(this.actionButton('settings', 'Ajustes', undefined, () => this.openSettingsModal()));
+    const panelsToggle = this.actionButton('panelLeft', 'Mostrar u ocultar los paneles laterales', undefined, () => {
+      const hidden = document.getElementById('app')?.classList.toggle('panels-hidden') ?? false;
+      panelsToggle.setAttribute('aria-pressed', String(hidden));
+    });
+    panelsToggle.classList.add('header-panel-toggle');
+    panelsToggle.setAttribute('aria-pressed', 'false');
+    actions.appendChild(panelsToggle);
     // Fase 6 hook: Export (Ctrl/Cmd+E), disabled while the timeline is empty.
     this.exportButton = iconButton({
       icon: 'export',
@@ -138,6 +153,8 @@ export class HeaderBar {
       onClick: () => getProductionServices()?.openExport(),
     });
     this.exportButton.setAttribute('aria-keyshortcuts', 'Control+E Meta+E');
+    // Fase 8: el engranaje del monitor abre estos mismos ajustes.
+    document.addEventListener('open-project-settings', () => this.openSettingsModal());
     actions.appendChild(this.exportButton);
     this.root.appendChild(actions);
 
@@ -257,6 +274,62 @@ export class HeaderBar {
       }),
     );
     this.openMenu = new Modal('Edición', list);
+  }
+
+  /** Fase 8: el menú Ver — paneles laterales y zoom del timeline. */
+  private openViewMenu(): void {
+    const app = document.getElementById('app');
+    const anchor = this.projectName.getBoundingClientRect();
+    showContextMenu(anchor.left, anchor.bottom + 4, [
+      {
+        label: app?.classList.contains('panels-hidden') ? 'Mostrar los paneles laterales' : 'Ocultar los paneles laterales',
+        action: () => {
+          app?.classList.toggle('panels-hidden');
+        },
+      },
+      { label: 'Acercar el timeline (Ctrl+=)', action: () => this.dispatch('timeline-zoom-in') },
+      { label: 'Alejar el timeline (Ctrl+-)', action: () => this.dispatch('timeline-zoom-out') },
+      { label: 'Ajustar el timeline al proyecto', action: () => this.dispatch('timeline-zoom-fit') },
+    ]);
+  }
+
+  /** Fase 8: pregunta al timeline por un cambio de zoom (sin acoplar módulos). */
+  private dispatch(type: string): void {
+    document.dispatchEvent(new CustomEvent(type));
+  }
+
+  /** Fase 8: renombra el proyecto sin abrir un modal. */
+  private renameProjectInline(): void {
+    const current = this.ctx.session.name;
+    const input = document.createElement('input');
+    input.type = 'text';
+    input.className = 'header-project-input';
+    input.value = current;
+    input.setAttribute('aria-label', 'Nombre del proyecto');
+    const commit = (accept: boolean): void => {
+      const next = input.value.trim() === '' ? current : input.value.trim();
+      if (accept && next !== current) {
+        this.ctx.session.name = next;
+        this.ctx.session.dirty = true;
+        this.ctx.requestAutosave();
+        document.dispatchEvent(new CustomEvent('project-changed'));
+      }
+      this.projectName.textContent = next;
+      input.replaceWith(this.projectName);
+    };
+    input.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        commit(true);
+      } else if (event.key === 'Escape') {
+        event.preventDefault();
+        commit(false);
+      }
+    });
+    input.addEventListener('blur', () => commit(true));
+    this.projectName.replaceWith(input);
+    input.focus();
+    input.select();
   }
 
   /** Opens a one-file picker (Fase 4). */

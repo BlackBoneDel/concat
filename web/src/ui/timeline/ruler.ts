@@ -12,8 +12,19 @@ import type { ThemeColors, TimelineViewport } from './types.ts';
 /** Height of the ruler strip in pixels. */
 export const RULER_HEIGHT = 28;
 
-/** How many seconds each grid step marks, given the zoom. */
-function gridStep(pixelsPerSecond: number): number {
+/** How many seconds each labelled (major) tick marks, given the zoom. */
+/**
+ * How many seconds between the short (minor) ticks: one second while it is
+ * legible, a fifth of the labelled step otherwise.
+ * @param pixelsPerSecond the zoom.
+ * @returns the minor step, in seconds.
+ */
+export function rulerMinorStep(pixelsPerSecond: number): number {
+  const major = rulerStep(pixelsPerSecond);
+  return pixelsPerSecond >= 6 ? 1 : Math.max(1, major / 5);
+}
+
+export function rulerStep(pixelsPerSecond: number): number {
   const options = [0.5, 1, 2, 5, 10, 30, 60, 120, 300, 600];
   for (const step of options) {
     if (step * pixelsPerSecond >= 60) return step;
@@ -48,27 +59,31 @@ export function drawRuler(
   ctx.clearRect(0, 0, width, RULER_HEIGHT);
   ctx.fillStyle = colors.rulerBackground;
   ctx.fillRect(0, 0, width, RULER_HEIGHT);
-  const step = gridStep(viewport.pixelsPerSecond);
+  const step = rulerStep(viewport.pixelsPerSecond);
   const first = Math.floor(viewport.scrollTime / step) * step;
   const last = viewport.scrollTime + width / viewport.pixelsPerSecond;
+  // One-second minor ticks first, the labelled ticks over them.
+  const minor = rulerMinorStep(viewport.pixelsPerSecond);
+  const firstMinor = Math.floor(viewport.scrollTime / minor) * minor;
   ctx.strokeStyle = colors.gridLine;
+  ctx.globalAlpha = 0.55;
+  ctx.beginPath();
+  for (let time = firstMinor; time <= last + minor; time += minor) {
+    const x = Math.round((time - viewport.scrollTime) * viewport.pixelsPerSecond) + 0.5;
+    ctx.moveTo(x, RULER_HEIGHT - 5);
+    ctx.lineTo(x, RULER_HEIGHT);
+  }
+  ctx.stroke();
+  ctx.globalAlpha = 1;
   ctx.fillStyle = colors.textDim;
   ctx.font = '10px system-ui, sans-serif';
   ctx.textBaseline = 'top';
   ctx.beginPath();
   for (let time = first; time <= last + step; time += step) {
     const x = Math.round((time - viewport.scrollTime) * viewport.pixelsPerSecond) + 0.5;
-    ctx.moveTo(x, RULER_HEIGHT - 10);
+    ctx.moveTo(x, RULER_HEIGHT - 12);
     ctx.lineTo(x, RULER_HEIGHT);
     ctx.fillText(formatRulerTime(time), x + 3, 4);
-  }
-  ctx.stroke();
-  // Minor ticks each half step.
-  ctx.beginPath();
-  for (let time = first; time <= last + step; time += step / 2) {
-    const x = Math.round((time - viewport.scrollTime) * viewport.pixelsPerSecond) + 0.5;
-    ctx.moveTo(x, RULER_HEIGHT - 5);
-    ctx.lineTo(x, RULER_HEIGHT);
   }
   ctx.stroke();
   ctx.strokeStyle = colors.border;

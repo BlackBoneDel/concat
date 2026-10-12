@@ -17,6 +17,7 @@ import {
   DuplicateClipOperation,
   SetTrackPropertyOperation,
   currentTimeline,
+  trackKindOf,
   type EditOperation,
   type MarkerData,
 } from '../editor/operations.ts';
@@ -31,6 +32,8 @@ import {
   TimelineView,
   Toolbar,
   TrackHeader,
+  buildTextClip,
+  insertTextClipOperation,
   ZoomControl,
   openMarkerEditor,
   type ClipPreviewer,
@@ -45,6 +48,7 @@ import {
   type ShortcutActions,
 } from './interactions/keyboard-shortcuts.ts';
 import type { AppContext } from './app-context.ts';
+import { REQUEST_ADD_TEXT_EVENT } from './ui-events.ts';
 import { clampBezier } from '../editor/keyframe-operations.ts';
 import { installMediaDrop, type MediaDropHandle } from './timeline/media-drop.ts';
 import type { KeyframeRef } from './timeline/keyframe-track.ts';
@@ -172,6 +176,11 @@ export class TimelinePanel {
         onChange: () => this.onEdited(),
         onPreview: () => this.updateOverlays(),
         onContextMenu: (x, y, clipId) => this.openMenu(x, y, clipId),
+        // Fase 8: the hand tool drags the viewport around.
+        pan: (deltaX, deltaY) => {
+          this.scrollEl.scrollLeft -= deltaX;
+          this.scrollEl.scrollTop -= deltaY;
+        },
       },
       this.contentWrap,
     );
@@ -262,7 +271,38 @@ export class TimelinePanel {
 
     // Keep the canvases sized and the playhead riding.
     document.addEventListener('media-strips-changed', () => this.view?.refreshStrips(), { signal });
+    // Fase 8: the Text tab of the media panel asks for a title at the playhead.
+    document.addEventListener(
+      REQUEST_ADD_TEXT_EVENT,
+      (event) => {
+        const content = (event as CustomEvent<string>).detail;
+        const session = this.session;
+        if (!session) return;
+        const timeline = currentTimeline(session.document);
+        const selected = [...session.selection.selectedClipIds][0];
+        const lane = selected ? timeline.clips.find((clip) => clip.id === selected)?.trackId : undefined;
+        const freeLane = timeline.tracks.find((track) => trackKindOf(session.document, track) !== 'audio')?.id;
+        let trackId = lane ?? freeLane;
+        if (!trackId) trackId = session.addTrack('video', timeline.tracks.length) ?? undefined;
+        if (!trackId) return;
+        const clip = buildTextClip({
+          trackId,
+          startSeconds: Math.max(0, this.app.player.currentTime.asNumber()),
+          content,
+        });
+        session.run(insertTextClipOperation(clip));
+        session.selection.selectClips([clip.id], false, session.document);
+        this.onEdited();
+        document.dispatchEvent(new CustomEvent('timeline-changed'));
+        this.app.notifications.info('Texto añadido', clip.name);
+      },
+      { signal },
+    );
     document.addEventListener('timeline-changed', () => this.refreshAll(), { signal });
+    // Fase 8: el menú Ver de la cabecera pide cambios de zoom.
+    document.addEventListener('timeline-zoom-in', () => this.zoomIn(), { signal });
+    document.addEventListener('timeline-zoom-out', () => this.zoomOut(), { signal });
+    document.addEventListener('timeline-zoom-fit', () => this.zoomFit(), { signal });
     document.addEventListener('selection-changed', () => this.refreshAll(), { signal });
     document.addEventListener('project-changed', () => this.refreshAll(), { signal });
     document.addEventListener('session-reset', () => this.refreshAll(), { signal });
@@ -393,6 +433,9 @@ export class TimelinePanel {
       this.session.history.canUndo(),
       this.session.history.canRedo(),
     );
+    // Fase 8: the hand tool shows the grab cursor over the whole surface.
+    this.scrollEl.classList.toggle('is-hand', this.tool === 'hand');
+    this.scrollEl.classList.toggle('is-blade', this.tool === 'blade');
   }
 
   /** Mirrors the clips as an accessible DOM list. */
@@ -633,10 +676,42 @@ export class TimelinePanel {
       },
       addTrack: (kind) => {
         if (!this.session) return;
-        this.session.addTrack(kind);
+        this.session.addTrack(kind, this.session.timeline.tracks.length);
         this.onEdited();
       },
+      // Fase 8: the Text button drops a title on the lane under the playhead.
+      addText: () => this.addTextAtPlayhead(),
+      zoomIn: () => this.zoomIn(),
+      zoomOut: () => this.zoomOut(),
+      zoomFit: () => this.zoomFit(),
     };
+  }
+
+  /**
+   * Fase 8: inserts a title clip at the playhead — on the selected clip’s
+   * lane, on the first video lane, or on a brand-new video lane.
+   * @returns the new clip id, or `null` when there is no session.
+   */
+  addTextAtPlayhead(): string | null {
+    const session = this.session;
+    if (!session) return null;
+    const timeline = currentTimeline(session.document);
+    const selected = [...session.selection.selectedClipIds][0];
+    const selectedTrack = selected
+      ? (timeline.clips.find((clip) => clip.id === selected)?.trackId ?? undefined)
+      : undefined;
+    const freeLane = timeline.tracks.find((track) => trackKindOf(session.document, track) !== 'audio')?.id;
+    let trackId = selectedTrack ?? freeLane;
+    if (!trackId) trackId = session.addTrack('video', timeline.tracks.length) ?? undefined;
+    if (!trackId) return null;
+    const start = Math.max(0, this.app.player.currentTime.asNumber());
+    const clip = buildTextClip({ trackId, startSeconds: start });
+    session.run(insertTextClipOperation(clip));
+    session.selection.selectClips([clip.id], false, session.document);
+    this.onEdited();
+    document.dispatchEvent(new CustomEvent('timeline-changed'));
+    this.app.notifications.info('Texto añadido', clip.name);
+    return clip.id;
   }
 
   /** Keyboard wiring. */

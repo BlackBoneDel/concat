@@ -2,9 +2,12 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 /**
- * The project inspector: timeline name, frame size and frame rate of the
- * edit. Video settings changes are their own reversible operation so they
- * obey the everything-through-history rule too.
+ * The project inspector — the right column's Details sheet (Fase 8):
+ * a PROJECT group (name, size, rate), a TIMELINE group (lanes, clips,
+ * duration) and a CONTENT group (media counts). With nothing selected the
+ * panel's "Modificar" button turns the numbers into editable fields; every
+ * commit is its own reversible operation, so the settings obey the
+ * everything-through-history rule too.
  */
 
 import type { ProjectDocument, VideoSettings } from '../../model/document.ts';
@@ -54,6 +57,8 @@ export interface ProjectInspectorOptions {
 export class ProjectInspector {
   readonly element: HTMLElement;
   private readonly options: ProjectInspectorOptions;
+  /** Fase 8: `true` while the numbers render as fields. */
+  private editing = false;
 
   /**
    * @param options host wiring.
@@ -64,6 +69,20 @@ export class ProjectInspector {
     this.element.className = 'inspector-section';
     this.element.setAttribute('role', 'group');
     this.element.setAttribute('aria-label', 'Inspector de proyecto');
+    this.show();
+  }
+
+  /** Fase 8: whether the sheet shows inputs instead of plain values. */
+  get isEditing(): boolean {
+    return this.editing;
+  }
+
+  /**
+   * Fase 8: switches between reading and editing the project settings.
+   * @param editing `true` for the editable sheet.
+   */
+  setEditing(editing: boolean): void {
+    this.editing = editing;
     this.show();
   }
 
@@ -82,16 +101,64 @@ export class ProjectInspector {
     group.appendChild(heading);
 
     group.appendChild(this.readonlyRow('Timeline', timeline.name === '' ? timeline.id : timeline.name));
-    group.appendChild(this.numberRow('Ancho', video.width, 16, 7680, 2, (width) =>
-      this.setVideo({ ...video, width: Math.trunc(width) }),
-    ));
-    group.appendChild(this.numberRow('Alto', video.height, 16, 4320, 2, (height) =>
-      this.setVideo({ ...video, height: Math.trunc(height) }),
-    ));
-    group.appendChild(this.numberRow('FPS', video.rateNum / video.rateDen, 1, 240, 1, (fps) =>
-      this.setVideo({ ...video, rateNum: Math.max(1, Math.round(fps)), rateDen: 1 }),
-    ));
+    group.appendChild(
+      this.editing
+        ? this.numberRow('Ancho', video.width, 16, 7680, 2, (width) =>
+            this.setVideo({ ...video, width: Math.trunc(width) }),
+          )
+        : this.readonlyRow('Ancho', `${video.width} px`),
+    );
+    group.appendChild(
+      this.editing
+        ? this.numberRow('Alto', video.height, 16, 4320, 2, (height) =>
+            this.setVideo({ ...video, height: Math.trunc(height) }),
+          )
+        : this.readonlyRow('Alto', `${video.height} px`),
+    );
+    group.appendChild(
+      this.editing
+        ? this.numberRow('FPS', video.rateNum / video.rateDen, 1, 240, 1, (fps) =>
+            this.setVideo({ ...video, rateNum: Math.max(1, Math.round(fps)), rateDen: 1 }),
+          )
+        : this.readonlyRow('FPS', `${Math.round(video.rateNum / video.rateDen)} fps`),
+    );
     this.element.appendChild(group);
+
+    // Fase 8: the edit's shape, then what the project holds.
+    const duration = timeline.clips.reduce((end, clip) => Math.max(end, clip.start + clip.duration), 0);
+    this.element.appendChild(
+      this.section('Timeline', [
+        ['Pistas', String(timeline.tracks.length)],
+        ['Clips', String(timeline.clips.length)],
+        ['Duración', `${duration.toFixed(2)} s`],
+      ]),
+    );
+    const media = doc.media;
+    const countOf = (kind: string): number => media.filter((item) => item.kind === kind).length;
+    this.element.appendChild(
+      this.section('Contenido', [
+        ['Vídeo', String(countOf('video'))],
+        ['Audio', String(countOf('audio'))],
+        ['Imágenes', String(countOf('image'))],
+      ]),
+    );
+  }
+
+  /**
+   * One read-only group of label/value rows.
+   * @param title the group heading.
+   * @param rows the pairs.
+   * @returns the group element.
+   */
+  private section(title: string, rows: readonly (readonly [string, string])[]): HTMLElement {
+    const group = document.createElement('div');
+    group.className = 'inspector-group';
+    const heading = document.createElement('h3');
+    heading.className = 'inspector-group-title';
+    heading.textContent = title;
+    group.appendChild(heading);
+    for (const [label, value] of rows) group.appendChild(this.readonlyRow(label, value));
+    return group;
   }
 
   /** Runs the video-settings op. */

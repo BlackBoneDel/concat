@@ -2,16 +2,21 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 /**
- * The timeline toolbar: tool switcher (V C B N Y U), snapping toggle,
- * edit actions (split, delete, duplicate, group, link), marker add,
- * undo/redo and the zoom control.
+ * The timeline toolbar, restyled as the CapCut-style HUD bar of Fase 8:
+ * a left group with the edit actions (add track, undo/redo, split, delete),
+ * the tool switcher, the snapping magnet (green while active), text and
+ * preview mute; and a right group with the cursor indicator and the zoom
+ * controls.
  *
- * Fase 7 hook: every button is a `.concat-icon-btn` with an inline SVG glyph
- * from `ui/components/icons.ts` and a native tooltip ("Cuchilla (C)").
+ * Every button is a `.timeline-toolbar-btn` icon button (inline SVG, native
+ * tooltip, no emoji anywhere), so the bar reads the same in the three themes.
+ * Actions newer than Fase 7 are optional: a host that does not pass them
+ * simply gets the button disabled instead of a broken layout.
  */
 
 import type { ToolId } from './types.ts';
-import { iconButton, setPressed, type IconName } from '../components/icons.ts';
+import { icon, iconButton, setPressed, type IconName } from '../components/icons.ts';
+import { PREVIEW_MUTE_EVENT } from '../ui-events.ts';
 
 /** The actions the toolbar buttons trigger. */
 export interface ToolbarActions {
@@ -26,6 +31,12 @@ export interface ToolbarActions {
   undo(): void;
   redo(): void;
   addTrack(kind: 'video' | 'audio'): void;
+  /** Fase 8: adds a title clip at the playhead. */
+  addText?(): void;
+  /** Fase 8: the right group's zoom controls (the zoom slot keeps its slider). */
+  zoomIn?(): void;
+  zoomOut?(): void;
+  zoomFit?(): void;
 }
 
 /** One tool's button metadata. */
@@ -39,6 +50,18 @@ export const TOOL_BUTTONS: readonly { id: ToolId; icon: IconName; key: string; l
   { id: 'pen', icon: 'pen', key: 'P', label: 'Pluma (keyframes)' },
 ];
 
+/** The label the cursor indicator shows per tool. */
+const TOOL_LABELS: Readonly<Record<ToolId, string>> = {
+  select: 'Selección',
+  blade: 'Cuchilla',
+  ripple: 'Ripple',
+  roll: 'Roll',
+  slip: 'Slip',
+  slide: 'Slide',
+  pen: 'Pluma',
+  hand: 'Mano',
+};
+
 /** The toolbar row. */
 export class Toolbar {
   readonly element: HTMLElement;
@@ -46,11 +69,13 @@ export class Toolbar {
   private readonly snapButton: HTMLButtonElement;
   private readonly undoButton: HTMLButtonElement;
   private readonly redoButton: HTMLButtonElement;
+  private readonly cursorLabel: HTMLElement;
+  private readonly cursorIcon: HTMLElement;
   private readonly abort = new AbortController();
 
   /**
    * @param actions button wiring.
-   * @param zoomSlot element to append at the end (the zoom control).
+   * @param zoomSlot element to append in the right group (the zoom control).
    */
   constructor(actions: ToolbarActions, zoomSlot?: HTMLElement) {
     this.element = document.createElement('div');
@@ -58,47 +83,94 @@ export class Toolbar {
     this.element.setAttribute('role', 'toolbar');
     this.element.setAttribute('aria-label', 'Herramientas del timeline');
 
+    const left = document.createElement('div');
+    left.className = 'tl-toolbar-group tl-toolbar-left';
+    const right = document.createElement('div');
+    right.className = 'tl-toolbar-group tl-toolbar-right';
+
+    // Add lane, then the history pair.
+    const add = this.button('videoPlus', 'Añadir pista de vídeo', undefined, () => actions.addTrack('video'));
+    add.classList.add('tl-tool-add');
+    const addAudio = this.button('audioPlus', 'Añadir pista de audio', undefined, () => actions.addTrack('audio'));
+    addAudio.classList.add('tl-tool-add-audio');
+    this.undoButton = this.button('undo', 'Deshacer', 'Ctrl+Z', () => actions.undo());
+    this.redoButton = this.button('redo', 'Rehacer', 'Ctrl+Y', () => actions.redo());
+    left.append(add, addAudio, this.separator(), this.undoButton, this.redoButton);
+
+    // Split / delete.
+    left.append(
+      this.separator(),
+      this.button('split', 'Dividir en el playhead', 'Ctrl+K', () => actions.splitAtPlayhead()),
+      this.button('trash', 'Eliminar selección', 'Supr', () => actions.deleteSelection()),
+    );
+
+    // The tool switcher (V C B N U Y P).
+    left.appendChild(this.separator());
     for (const tool of TOOL_BUTTONS) {
       const button = this.button(tool.icon, tool.label, tool.key, () => actions.setTool(tool.id));
       button.classList.add(`tl-tool-${tool.id}`);
       setPressed(button, tool.id === 'select');
       this.toolButtons.set(tool.id, button);
-      this.element.appendChild(button);
+      left.appendChild(button);
     }
-    this.element.appendChild(this.divider());
 
+    // Hand, snapping magnet, text and mute.
+    const hand = this.button('hand', 'Mano (desplazar)', 'H', () => actions.setTool('hand'));
+    hand.classList.add('tl-tool-hand');
+    setPressed(hand, false);
+    this.toolButtons.set('hand', hand);
     this.snapButton = this.button('magnet', 'Snapping magnético', 'S', () => actions.toggleSnapping());
+    this.snapButton.classList.add('timeline-toolbar-snap');
     setPressed(this.snapButton, true);
-    this.element.appendChild(this.snapButton);
+    const text = this.button('text', 'Añadir texto', 'T', () => actions.addText?.());
+    text.classList.add('tl-tool-text');
+    if (!actions.addText) text.disabled = true;
+    const mute = this.button('volumeMute', 'Silenciar la previsualización', undefined, () => {
+      document.dispatchEvent(new CustomEvent(PREVIEW_MUTE_EVENT));
+    });
+    mute.classList.add('tl-tool-mute');
+    left.append(this.separator(), hand, this.snapButton, text, mute);
 
-    this.element.append(
-      this.button('split', 'Dividir en el playhead', 'Ctrl+K', () => actions.splitAtPlayhead()),
-      this.button('trash', 'Eliminar selección', 'Supr', () => actions.deleteSelection()),
-      this.button('duplicate', 'Duplicar', 'Ctrl+D', () => actions.duplicateSelection()),
-      this.button('group', 'Agrupar', 'Ctrl+G', () => actions.groupSelection()),
-      this.button('link', 'Vincular vídeo y audio', 'Ctrl+L', () => actions.linkSelection()),
-      this.button('marker', 'Añadir marcador', 'M', () => actions.addMarker()),
-    );
-    this.element.appendChild(this.divider());
+    // Right group: what the pointer is doing, then the zoom controls.
+    const cursor = document.createElement('span');
+    cursor.className = 'tl-cursor-indicator';
+    this.cursorIcon = document.createElement('span');
+    this.cursorIcon.className = 'tl-cursor-icon';
+    this.cursorIcon.appendChild(icon('cursor', { size: 14 }));
+    this.cursorLabel = document.createElement('span');
+    this.cursorLabel.className = 'tl-cursor-label';
+    this.cursorLabel.textContent = TOOL_LABELS.select;
+    cursor.append(this.cursorIcon, this.cursorLabel);
+    right.appendChild(cursor);
+    if (zoomSlot) right.appendChild(zoomSlot);
+    else {
+      right.append(
+        this.button('zoomOut', 'Alejar', 'Ctrl+-', () => actions.zoomOut?.()),
+        this.button('fit', 'Ajustar al proyecto', 'Ctrl+0', () => actions.zoomFit?.()),
+        this.button('zoomIn', 'Acercar', 'Ctrl+=', () => actions.zoomIn?.()),
+      );
+    }
 
-    this.element.append(
-      this.button('videoPlus', 'Añadir pista de vídeo', undefined, () => actions.addTrack('video')),
-      this.button('audioPlus', 'Añadir pista de audio', undefined, () => actions.addTrack('audio')),
-    );
-    this.element.appendChild(this.divider());
-
-    this.undoButton = this.button('undo', 'Deshacer', 'Ctrl+Z', () => actions.undo());
-    this.redoButton = this.button('redo', 'Rehacer', 'Ctrl+Y', () => actions.redo());
-    this.element.append(this.undoButton, this.redoButton);
-    if (zoomSlot) this.element.appendChild(zoomSlot);
+    this.element.append(left, right);
   }
 
-  /** Marks the active tool and toggle states. */
+  /**
+   * Marks the active tool and toggle states.
+   * @param tool the current tool.
+   * @param snapping whether the magnet is armed.
+   * @param canUndo whether Undo has history behind it.
+   * @param canRedo whether Redo has history ahead of it.
+   */
   setTool(tool: ToolId, snapping: boolean, canUndo: boolean, canRedo: boolean): void {
     for (const [id, button] of this.toolButtons) setPressed(button, id === tool);
     setPressed(this.snapButton, snapping);
+    this.snapButton.classList.toggle('snap-active', snapping);
+    this.snapButton.title = snapping ? 'Snapping magnético activo (S)' : 'Snapping magnético (S)';
     this.undoButton.disabled = !canUndo;
     this.redoButton.disabled = !canRedo;
+    this.cursorLabel.textContent = TOOL_LABELS[tool];
+    const glyph: IconName = tool === 'hand' ? 'hand' : tool === 'select' ? 'cursor' : 'sliders';
+    this.cursorIcon.replaceChildren(icon(glyph, { size: 14 }));
   }
 
   /**
@@ -110,13 +182,20 @@ export class Toolbar {
    * @returns the button.
    */
   private button(glyph: IconName, label: string, shortcut: string | undefined, onClick: () => void): HTMLButtonElement {
-    return iconButton({ icon: glyph, label, shortcut, className: 'tl-tool-btn', onClick: () => onClick(), signal: this.abort.signal });
+    return iconButton({
+      icon: glyph,
+      label,
+      shortcut,
+      className: 'tl-tool-btn timeline-toolbar-btn',
+      onClick: () => onClick(),
+      signal: this.abort.signal,
+    });
   }
 
-  /** A separator. */
-  private divider(): HTMLElement {
+  /** A separator between control groups. */
+  private separator(): HTMLElement {
     const divider = document.createElement('span');
-    divider.className = 'tl-toolbar-divider';
+    divider.className = 'tl-toolbar-divider timeline-toolbar-separator';
     divider.setAttribute('aria-hidden', 'true');
     return divider;
   }

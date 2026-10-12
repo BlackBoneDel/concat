@@ -2,25 +2,68 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 /**
- * The media panel: import (button + drag & drop) and the library grid.
- * Double-clicking an item drops it on the timeline at the playhead; a single
- * click selects it for the inspector's media info.
+ * The media panel — the left column of the CapCut-style HUD (Fase 8):
+ * a tab strip (Medios, Texto, Transiciones, Efectos, Filtros, Plantillas),
+ * a full-width import button, a collapsible tree with per-kind counts and the
+ * three-column thumbnail grid with a duration badge.
  *
- * Fase 4: folder and subtitle import, proxy badge ("P") with progress,
- * offline state (click to relink) and a context menu with proxy, metadata,
- * relink and OPFS actions.
+ * The library behaves exactly as before: import (button + drag & drop of OS
+ * files), double-click to drop on the timeline, single click to select,
+ * context menu with proxy/metadata/relink actions, and cards that are drag
+ * sources for the timeline (`application/x-concat-media`).
+ *
+ * The catalog tabs list real project data (`TEXT_PRESETS`, `TRANSITION_KINDS`,
+ * the effect catalog, the LUT library and the motion presets). Text entries
+ * ask the timeline to add a title at the playhead; the rest are references
+ * until their editors land, so they are shown as chips, never as dead
+ * buttons that pretend to work.
  */
 
-import { icon } from './components/icons.ts';
+import { icon, iconButton } from './components/icons.ts';
 import { writeMediaDrag } from './dnd/media-drag.ts';
 import type { MediaAsset } from '../media/media-pool.ts';
 import type { AppContext } from './app-context.ts';
 import { formatDuration } from '../player/timecode.ts';
 import { getMediaTools } from './media-tools.ts';
 import { showContextMenu, showMetadataDialog } from './media-context-menu.ts';
+import { TRANSITION_KINDS } from '../editor/operations.ts';
+import { TEXT_PRESETS } from '../presets/text-presets.ts';
+import { MOTION_PRESETS } from '../presets/motion-presets.ts';
+import { EFFECT_FRAGMENT_SHADERS } from '../media/effects/video-effects.ts';
+import { REQUEST_ADD_TEXT_EVENT } from './ui-events.ts';
 
 /** Subtitle extensions routed to the subtitle importer on drop. */
 const SUBTITLE_FILE = /\.(srt|vtt)$/i;
+
+/** The tabs of the left column. */
+const TABS: readonly { id: MediaTab; label: string; icon: Parameters<typeof icon>[0] }[] = [
+  { id: 'media', label: 'Medios', icon: 'film' },
+  { id: 'text', label: 'Texto', icon: 'text' },
+  { id: 'transitions', label: 'Transiciones', icon: 'layers' },
+  { id: 'effects', label: 'Efectos', icon: 'sparkles' },
+  { id: 'filters', label: 'Filtros', icon: 'sliders' },
+  { id: 'templates', label: 'Plantillas', icon: 'layoutGrid' },
+];
+
+/** The left column's tabs. */
+export type MediaTab = 'media' | 'text' | 'transitions' | 'effects' | 'filters' | 'templates';
+
+/** The kind filter of the library tree. */
+type KindFilter = 'all' | 'video' | 'audio' | 'image';
+
+/** Human labels of the catalog chips. */
+const TRANSITION_LABELS: Readonly<Record<string, string>> = {
+  crossfade: 'Fundido cruzado',
+  dissolve: 'Disolvencia',
+  'fade-black': 'Fundido a negro',
+  'fade-white': 'Fundido a blanco',
+  'wipe-left': 'Barrido a la izquierda',
+  'wipe-right': 'Barrido a la derecha',
+  'wipe-up': 'Barrido hacia arriba',
+  'wipe-down': 'Barrido hacia abajo',
+  'slide-left': 'Deslizar a la izquierda',
+  'slide-right': 'Deslizar a la derecha',
+};
 
 /** The left panel of the shell. */
 export class MediaPanel {
@@ -28,7 +71,16 @@ export class MediaPanel {
   private readonly ctx: AppContext;
   private readonly grid: HTMLElement;
   private readonly empty: HTMLElement;
+  private readonly drop: HTMLElement;
+  private readonly tabsEl: HTMLElement;
+  private readonly catalog: HTMLElement;
+  private readonly treeEl: HTMLElement;
+  private readonly tabPanels = new Map<MediaTab, HTMLElement>();
+  private readonly tabButtons = new Map<MediaTab, HTMLButtonElement>();
+  private readonly treeButtons = new Map<KindFilter, HTMLButtonElement>();
   private selectedId: string | null = null;
+  private tab: MediaTab = 'media';
+  private filter: KindFilter = 'all';
 
   /**
    * @param root the panel element.
@@ -39,55 +91,120 @@ export class MediaPanel {
     this.ctx = ctx;
 
     const header = document.createElement('div');
-    header.className = 'panel-header';
+    header.className = 'panel-header panel-header-media';
     const title = document.createElement('h2');
     title.className = 'panel-title';
     title.textContent = 'Medios';
     header.appendChild(title);
-
-    const importButton = document.createElement('button');
-    importButton.type = 'button';
-    importButton.className = 'btn btn-primary btn-small';
-    importButton.textContent = '+ Importar';
-    importButton.title = 'Importar archivos (Ctrl+I)';
-    importButton.addEventListener('click', () => this.openPicker());
-    header.appendChild(importButton);
-
-    // Fase 4: folder (bulk) and subtitle import.
-    const folderButton = document.createElement('button');
-    folderButton.type = 'button';
-    folderButton.className = 'btn btn-ghost btn-small';
-    folderButton.textContent = 'Carpeta…';
-    folderButton.title = 'Importar una carpeta completa';
-    folderButton.addEventListener('click', () => getMediaTools()?.importFolder());
-    const subtitleButton = document.createElement('button');
-    subtitleButton.type = 'button';
-    subtitleButton.className = 'btn btn-ghost btn-small';
-    subtitleButton.textContent = 'Subtítulos…';
-    subtitleButton.title = 'Importar subtítulos (.srt / .vtt)';
-    subtitleButton.addEventListener('click', () => this.openSubtitlePicker());
-    header.append(folderButton, subtitleButton);
+    const actions = document.createElement('div');
+    actions.className = 'panel-header-actions';
+    // Fase 8: the imports live in the icon row; the button below is the CTA.
+    actions.append(
+      iconButton({ icon: 'folder', label: 'Importar una carpeta completa', size: 16, className: 'media-header-btn media-header-folder', onClick: () => getMediaTools()?.importFolder() }),
+      iconButton({ icon: 'text', label: 'Importar subtítulos (.srt / .vtt)', size: 16, className: 'media-header-btn media-header-subtitles', onClick: () => this.openSubtitlePicker() }),
+    );
+    header.appendChild(actions);
     this.root.appendChild(header);
 
-    const drop = document.createElement('div');
-    drop.className = 'media-drop';
-    this.grid = document.createElement('div');
-    this.grid.className = 'media-grid';
+    // Tabs.
+    this.tabsEl = document.createElement('div');
+    this.tabsEl.className = 'panel-tabs';
+    this.tabsEl.setAttribute('role', 'tablist');
+    this.tabsEl.setAttribute('aria-label', 'Biblioteca');
+    for (const tab of TABS) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'panel-tab';
+      button.dataset['tab'] = tab.id;
+      button.setAttribute('role', 'tab');
+      button.title = tab.label;
+      button.append(icon(tab.icon, { size: 14 }));
+      const label = document.createElement('span');
+      label.className = 'panel-tab-label';
+      label.textContent = tab.label;
+      button.appendChild(label);
+      button.addEventListener('click', () => this.setTab(tab.id));
+      this.tabButtons.set(tab.id, button);
+      this.tabsEl.appendChild(button);
+    }
+    this.root.appendChild(this.tabsEl);
+
+    const body = document.createElement('div');
+    body.className = 'panel-body';
+    this.root.appendChild(body);
+
+    // Media tab: import CTA, tree, grid.
+    const mediaPanel = document.createElement('div');
+    mediaPanel.className = 'media-tab-panel media-tab-panel-media';
+    this.tabPanels.set('media', mediaPanel);
+
+    const importRow = document.createElement('div');
+    importRow.className = 'media-import-row';
+    const importButton = document.createElement('button');
+    importButton.type = 'button';
+    importButton.className = 'btn btn-primary media-import-btn';
+    importButton.title = 'Importar archivos (Ctrl+I)';
+    importButton.append(icon('plus', { size: 16 }));
+    const importLabel = document.createElement('span');
+    importLabel.textContent = 'Importar';
+    importButton.appendChild(importLabel);
+    importButton.addEventListener('click', () => this.openPicker());
+    importRow.appendChild(importButton);
+    mediaPanel.appendChild(importRow);
+
+    this.treeEl = document.createElement('div');
+    this.treeEl.className = 'media-tree';
+    this.treeEl.setAttribute('role', 'group');
+    this.treeEl.setAttribute('aria-label', 'Filtrar la biblioteca');
+    const filters: readonly { id: KindFilter; label: string; glyph: 'film' | 'music' | 'layers' }[] = [
+      { id: 'all', label: 'Todos los medios', glyph: 'film' },
+      { id: 'video', label: 'Vídeo', glyph: 'film' },
+      { id: 'audio', label: 'Audio', glyph: 'music' },
+      { id: 'image', label: 'Imágenes', glyph: 'layers' },
+    ];
+    for (const entry of filters) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'media-tree-item';
+      button.dataset['filter'] = entry.id;
+      button.addEventListener('click', () => this.setFilter(entry.id));
+      button.append(icon(entry.glyph, { size: 14 }));
+      const label = document.createElement('span');
+      label.className = 'media-tree-label';
+      label.textContent = entry.label;
+      const count = document.createElement('span');
+      count.className = 'media-count';
+      count.textContent = '0';
+      button.append(label, count);
+      this.treeButtons.set(entry.id, button);
+      this.treeEl.appendChild(button);
+    }
+    mediaPanel.appendChild(this.treeEl);
+
+    this.drop = document.createElement('div');
+    this.drop.className = 'media-drop';
     this.empty = document.createElement('div');
     this.empty.className = 'panel-empty';
     this.empty.textContent = 'Arrastra archivos aquí o pulsa Importar';
-    drop.appendChild(this.empty);
-    drop.appendChild(this.grid);
-    this.root.appendChild(drop);
+    this.grid = document.createElement('div');
+    this.grid.className = 'media-grid';
+    this.drop.append(this.empty, this.grid);
+    mediaPanel.appendChild(this.drop);
+    body.appendChild(mediaPanel);
 
-    drop.addEventListener('dragover', (event) => {
+    // Catalog tabs (text, transitions, effects, filters, templates).
+    this.catalog = document.createElement('div');
+    this.catalog.className = 'media-catalog';
+    body.appendChild(this.catalog);
+
+    this.root.addEventListener('dragover', (event) => {
       event.preventDefault();
-      drop.classList.add('drag-over');
+      this.drop.classList.add('drag-over');
     });
-    drop.addEventListener('dragleave', () => drop.classList.remove('drag-over'));
-    drop.addEventListener('drop', (event) => {
+    this.root.addEventListener('dragleave', () => this.drop.classList.remove('drag-over'));
+    this.root.addEventListener('drop', (event) => {
       event.preventDefault();
-      drop.classList.remove('drag-over');
+      this.drop.classList.remove('drag-over');
       const files = [...(event.dataTransfer?.files ?? [])];
       const subtitles = files.filter((file) => SUBTITLE_FILE.test(file.name));
       const media = files.filter((file) => !SUBTITLE_FILE.test(file.name));
@@ -98,17 +215,53 @@ export class MediaPanel {
     document.addEventListener('media-library-changed', () => this.refresh());
     // Fase 4: proxy progress / offline changes repaint the badges.
     document.addEventListener('media-proxy-changed', () => this.refresh());
+    this.setTab('media');
     this.refresh();
   }
 
-  /** Re-reads the pool into the grid. */
-  refresh(): void {
-    this.grid.replaceChildren();
-    const assets = this.ctx.pool.listMedia();
-    this.empty.style.display = assets.length === 0 ? '' : 'none';
-    for (const asset of assets) {
-      this.grid.appendChild(this.card(asset));
+  /** The active tab. */
+  get activeTab(): MediaTab {
+    return this.tab;
+  }
+
+  /**
+   * Switches the visible tab.
+   * @param tab the tab to show.
+   */
+  setTab(tab: MediaTab): void {
+    this.tab = tab;
+    for (const [id, button] of this.tabButtons) {
+      const active = id === tab;
+      button.classList.toggle('is-active', active);
+      button.setAttribute('aria-selected', String(active));
     }
+    const media = this.tabPanels.get('media');
+    if (media) media.hidden = tab !== 'media';
+    this.catalog.hidden = tab === 'media';
+    if (tab !== 'media') this.renderCatalog(tab);
+  }
+
+  /** Re-reads the pool into the grid, tree counts and catalog. */
+  refresh(): void {
+    const assets = this.ctx.pool.listMedia();
+    const counts: Record<KindFilter, number> = { all: assets.length, video: 0, audio: 0, image: 0 };
+    for (const asset of assets) counts[asset.type] += 1;
+    for (const [id, button] of this.treeButtons) {
+      const count = button.querySelector('.media-count');
+      if (count) count.textContent = String(counts[id]);
+      button.classList.toggle('is-active', id === this.filter);
+      button.setAttribute('aria-pressed', String(id === this.filter));
+    }
+
+    this.grid.replaceChildren();
+    const visible = this.filter === 'all' ? assets : assets.filter((asset) => asset.type === this.filter);
+    this.empty.style.display = assets.length === 0 ? '' : 'none';
+    this.empty.textContent =
+      assets.length === 0
+        ? 'Arrastra archivos aquí o pulsa Importar'
+        : 'Ningún medio de este tipo en la biblioteca';
+    for (const asset of visible) this.grid.appendChild(this.card(asset));
+    if (this.tab !== 'media') this.renderCatalog(this.tab);
   }
 
   /** Opens the file picker. */
@@ -153,8 +306,14 @@ export class MediaPanel {
     } else {
       thumbWrap.classList.add('media-thumb-audio');
       // Fase 7 hook: SVG glyph for audio-only assets.
-      thumbWrap.appendChild(icon('music', { size: 28, className: 'media-thumb-icon' }));
+      thumbWrap.appendChild(icon(asset.type === 'image' ? 'layers' : 'music', { size: 28, className: 'media-thumb-icon' }));
     }
+    // Fase 8: the duration badge rides the thumbnail, CapCut style.
+    const badge = document.createElement('span');
+    badge.className = 'media-duration-badge';
+    badge.textContent = asset.type === 'image' ? 'Imagen' : formatDuration(asset.duration);
+    badge.title = asset.type === 'image' ? 'Fotograma fijo' : `Duración: ${formatDuration(asset.duration)}`;
+    thumbWrap.appendChild(badge);
     card.appendChild(thumbWrap);
 
     const meta = document.createElement('div');
@@ -296,6 +455,106 @@ export class MediaPanel {
       { label: 'Gestor de proxies…', action: () => tools?.openProxyManager(), disabled: !tools },
       { label: 'Eliminar del almacenamiento (OPFS)', action: () => void this.removeAsset(asset) },
     ], card);
+  }
+
+  /**
+   * Fase 8: the catalog of a non-media tab — real project data, honest labels.
+   * @param tab the tab to render.
+   */
+  private renderCatalog(tab: MediaTab): void {
+    this.catalog.replaceChildren();
+    if (tab === 'text') {
+      this.catalogSection('Títulos', 'Se añaden al playhead en la pista seleccionada.');
+      for (const preset of TEXT_PRESETS) {
+        this.catalogRow(preset.name, preset.type === 'text' ? 'Título con estilo propio' : 'Animación de entrada', [{
+          label: 'Añadir',
+          onClick: () => document.dispatchEvent(new CustomEvent(REQUEST_ADD_TEXT_EVENT, { detail: preset.name })),
+        }]);
+      }
+      return;
+    }
+    if (tab === 'transitions') {
+      this.catalogSection('Transiciones', 'Se aplican entre dos clips contiguos de la misma pista.');
+      this.chips(TRANSITION_KINDS.map((kind) => TRANSITION_LABELS[kind] ?? kind));
+      return;
+    }
+    if (tab === 'effects') {
+      this.catalogSection('Efectos', 'Se apilan en el inspector del clip seleccionado.');
+      this.chips(Object.keys(EFFECT_FRAGMENT_SHADERS).map((name) => name.charAt(0).toUpperCase() + name.slice(1)));
+      return;
+    }
+    if (tab === 'filters') {
+      const luts = getMediaTools()?.luts.list() ?? [];
+      this.catalogSection('Filtros (LUT)', 'Archivo → Importar LUT carga un .cube en la biblioteca.');
+      if (luts.length === 0) this.catalogHint('Aún no hay LUT en la biblioteca del proyecto.');
+      else this.chips(luts.map((lut) => lut.title));
+      return;
+    }
+    this.catalogSection('Plantillas', 'Animaciones de entrada listas para el clip seleccionado.');
+    this.chips([...MOTION_PRESETS, ...TEXT_PRESETS].map((preset) => preset.name));
+  }
+
+  /** A catalog section: title plus a one-line hint. */
+  private catalogSection(title: string, hint: string): void {
+    const heading = document.createElement('h3');
+    heading.className = 'media-catalog-title';
+    heading.textContent = title;
+    const note = document.createElement('p');
+    note.className = 'media-catalog-hint';
+    note.textContent = hint;
+    this.catalog.append(heading, note);
+  }
+
+  /** A row with one action (titles). */
+  private catalogRow(name: string, detail: string, actions: readonly { label: string; onClick: () => void }[]): void {
+    const row = document.createElement('div');
+    row.className = 'media-catalog-row';
+    const text = document.createElement('div');
+    text.className = 'media-catalog-text';
+    const title = document.createElement('div');
+    title.className = 'media-catalog-name';
+    title.textContent = name;
+    const sub = document.createElement('div');
+    sub.className = 'media-catalog-detail';
+    sub.textContent = detail;
+    text.append(title, sub);
+    row.appendChild(text);
+    for (const action of actions) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'btn btn-ghost btn-small media-catalog-action';
+      button.textContent = action.label;
+      button.addEventListener('click', action.onClick);
+      row.appendChild(button);
+    }
+    this.catalog.appendChild(row);
+  }
+
+  /** Read-only chips (transitions, effects, LUTs, presets). */
+  private chips(labels: readonly string[]): void {
+    const wrap = document.createElement('div');
+    wrap.className = 'media-chips';
+    for (const label of labels) {
+      const chip = document.createElement('span');
+      chip.className = 'media-chip';
+      chip.textContent = label;
+      wrap.appendChild(chip);
+    }
+    this.catalog.appendChild(wrap);
+  }
+
+  /** A muted hint line. */
+  private catalogHint(text: string): void {
+    const hint = document.createElement('p');
+    hint.className = 'media-catalog-hint';
+    hint.textContent = text;
+    this.catalog.appendChild(hint);
+  }
+
+  /** Applies the tree filter. */
+  private setFilter(filter: KindFilter): void {
+    this.filter = filter;
+    this.refresh();
   }
 
   /** Removes an asset after confirmation. */
