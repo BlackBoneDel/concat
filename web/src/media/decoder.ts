@@ -512,7 +512,10 @@ export class MediaDecoder {
     }
     const element = this.ensureElement();
     if (!element) return null;
-    const clamped = Math.min(Math.max(0, time), Math.max(0, element.duration - 0.001));
+    // Fase 7+: WebM/MKV files (OBS recordings, live-muxed streams) report
+    // `NaN`/`Infinity` durations — clamping against those produced
+    // `currentTime = NaN`, which throws and killed every thumbnail.
+    const clamped = clampSeekTime(time, element.duration);
     if (element.readyState < 2 || Math.abs(element.currentTime - clamped) > 0.02) {
       await seekElement(element, clamped);
     }
@@ -623,9 +626,96 @@ function seekElement(element: HTMLVideoElement, time: number): Promise<void> {
       resolve();
     };
     element.addEventListener('seeked', done);
-    element.currentTime = time;
+    // Fase 7+: never assign a non-finite `currentTime` (throws in every
+    // engine); elements without metadata yet also refuse the seek, which
+    // the timeout below absorbs.
+    const target = Number.isFinite(time) && time > 0 ? time : 0;
+    try {
+      element.currentTime = target;
+    } catch {
+      // Not seekable yet: resolve through the timeout.
+    }
     // Some browsers fire nothing when the seek is a no-op.
     globalThis.setTimeout(done, 250);
+  });
+}
+
+/**
+ * The finite, non-negative seek target for `currentTime`.
+ *
+ * WebM files without a duration in the header (OBS recordings, live-muxed
+ * streams) make `element.duration` `NaN` or `Infinity`; the old
+ * `Math.min(Math.max(0, t), duration - 0.001)` clamp turned those into
+ * `currentTime = NaN`, which throws and aborted thumbnail generation.
+ * @param time the wanted instant (seconds); non-finite values map to 0.
+ * @param duration the element's duration; non-finite/non-positive means
+ * "unknown" and the (sanitized) time is used unclamped.
+ * @returns a value that is always safe to assign to `currentTime`.
+ */
+export function clampSeekTime(time: number, duration: number): number {
+  const target = Number.isFinite(time) ? Math.max(0, time) : 0;
+  if (!Number.isFinite(duration) || duration <= 0) return target;
+  return Math.min(target, Math.max(0, duration - 0.001));
+}
+
+/**
+ * A duration usable for probing: `Infinity` (stream-shaped WebM/MKV) and
+ * `NaN` (metadata not loaded) both mean "unknown" and map to 0.
+ * @param value the raw `element.duration`.
+ * @returns the finite positive duration, or 0.
+ */
+export function finiteDuration(value: number): number {
+  return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+/** The parts of `HTMLMediaElement` the duration-reveal seek uses. */
+export interface DurationProbeElement {
+  duration: number;
+  currentTime: number;
+  addEventListener(type: string, listener: () => void): void;
+  removeEventListener(type: string, listener: () => void): void;
+}
+
+/**
+ * Reveals the real duration of files that report `Infinity`/`NaN` (the OBS
+ * problem: the muxer never wrote a total duration). Seeking to an absurdly
+ * large time forces the element to scan to the end, announcing the real
+ * duration through `durationchange`/`seeked`; afterwards the element is
+ * rewound to 0.
+ * @param element a media element with (or without) a known duration.
+ * @param timeoutMs how long to wait for the reveal (default 2.5 s).
+ * @returns the discovered finite duration, or 0 when it never appeared.
+ */
+export function revealDuration(element: DurationProbeElement, timeoutMs = 2500): Promise<number> {
+  const known = finiteDuration(element.duration);
+  if (known > 0) return Promise.resolve(known);
+  return new Promise<number>((resolve) => {
+    let settled = false;
+    const finish = (value: number): void => {
+      if (settled) return;
+      settled = true;
+      element.removeEventListener('durationchange', onChange);
+      element.removeEventListener('seeked', onChange);
+      try {
+        element.currentTime = 0;
+      } catch {
+        // Some elements refuse seeks before metadata — nothing to rewind.
+      }
+      resolve(value);
+    };
+    const onChange = (): void => {
+      const found = finiteDuration(element.duration);
+      if (found > 0) finish(found);
+    };
+    element.addEventListener('durationchange', onChange);
+    element.addEventListener('seeked', onChange);
+    globalThis.setTimeout(() => finish(finiteDuration(element.duration)), timeoutMs);
+    try {
+      // The element clamps the overshoot to the real end of the media.
+      element.currentTime = Number.MAX_VALUE;
+    } catch {
+      finish(finiteDuration(element.duration));
+    }
   });
 }
 
@@ -650,10 +740,17 @@ async function probeElement(
       element.addEventListener('loadedmetadata', done);
       globalThis.setTimeout(done, 3000);
     });
+    // Fase 7+: OBS/stream-shaped files answer `Infinity` (or `NaN`) here —
+    // reveal the real duration with the seek-to-the-end trick instead of
+    // importing a 0-second asset.
+    let duration = finiteDuration(element.duration);
+    if (duration === 0 && !Number.isFinite(element.duration)) {
+      duration = await revealDuration(element as unknown as DurationProbeElement);
+    }
     return {
       width: 'videoWidth' in element ? element.videoWidth : 0,
       height: 'videoHeight' in element ? element.videoHeight : 0,
-      duration: Number.isFinite(element.duration) ? element.duration : 0,
+      duration,
       fps: null,
     };
   } finally {

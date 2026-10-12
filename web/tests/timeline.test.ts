@@ -156,3 +156,140 @@ describe('Timeline', () => {
     expect(timeline.clipOnTrackAt(track, seconds(1n))!.equals(first)).toBe(true);
   });
 });
+
+// -- Fase 7+: captura de drops de archivos en el timeline ------------------
+
+import { vi } from 'vitest';
+import {
+  dragHasFiles,
+  installDropGuard,
+  installFileDrop,
+  type DragEventLike,
+  type DropTargetLike,
+} from '../src/ui/timeline/file-drop.ts';
+
+/** A drop-target double that records listeners, classes and events. */
+function fakeDropTarget() {
+  const listeners = new Map<string, ((event: DragEventLike) => void)[]>();
+  const classes = new Set<string>();
+  const target: DropTargetLike = {
+    classList: {
+      add: (name: string) => void classes.add(name),
+      remove: (name: string) => void classes.delete(name),
+    },
+    getBoundingClientRect: () => ({ left: 100, top: 50 }),
+    addEventListener: (type, listener) => {
+      listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+    },
+    removeEventListener: (type, listener) => {
+      listeners.set(type, (listeners.get(type) ?? []).filter((l) => l !== listener));
+    },
+  };
+  const fire = (type: string, event: DragEventLike): void => {
+    for (const listener of listeners.get(type) ?? []) listener(event);
+  };
+  return { target, listeners, classes, fire };
+}
+
+function dragEvent(init: { files?: File[]; types?: string[]; clientX?: number; clientY?: number } = {}): DragEventLike & {
+  preventDefault: ReturnType<typeof vi.fn>;
+  stopPropagation: ReturnType<typeof vi.fn>;
+} {
+  return {
+    dataTransfer: { files: init.files ?? [], types: init.types ?? ['Files'], dropEffect: '' },
+    clientX: init.clientX ?? 0,
+    clientY: init.clientY ?? 0,
+    preventDefault: vi.fn(),
+    stopPropagation: vi.fn(),
+  };
+}
+
+describe('installFileDrop (timeline)', () => {
+  it('dragover con archivos previene el default y ofrece copy', () => {
+    const { target, fire } = fakeDropTarget();
+    installFileDrop(target, { onFiles: () => undefined });
+    const event = dragEvent();
+    fire('dragover', event);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.dataTransfer!.dropEffect).toBe('copy');
+  });
+
+  it('dragenter/dragleave equilibran la clase de hover', () => {
+    const { target, classes, fire } = fakeDropTarget();
+    installFileDrop(target, { onFiles: () => undefined });
+    fire('dragenter', dragEvent());
+    fire('dragenter', dragEvent()); // nested element
+    expect(classes.has('drag-over')).toBe(true);
+    fire('dragleave', dragEvent());
+    expect(classes.has('drag-over')).toBe(true); // still inside
+    fire('dragleave', dragEvent());
+    expect(classes.has('drag-over')).toBe(false);
+  });
+
+  it('drop entrega los archivos y el punto relativo al panel', () => {
+    const { target, classes, fire } = fakeDropTarget();
+    const dropped: { files: File[]; point: { x: number; y: number } }[] = [];
+    installFileDrop(target, { onFiles: (files, point) => dropped.push({ files, point }) });
+    fire('dragenter', dragEvent());
+    const file = new File(['video'], 'obs-recording.webm');
+    const event = dragEvent({ files: [file], clientX: 250, clientY: 130 });
+    fire('drop', event);
+    expect(event.preventDefault).toHaveBeenCalled();
+    expect(event.stopPropagation).toHaveBeenCalled();
+    expect(dropped).toHaveLength(1);
+    expect(dropped[0]!.files).toEqual([file]);
+    // rect left/top = 100/50 → the point is local to the panel.
+    expect(dropped[0]!.point).toEqual({ x: 150, y: 80 });
+    expect(classes.has('drag-over')).toBe(false);
+  });
+
+  it('ignora los drags internos (sin tipo Files)', () => {
+    const { target, fire } = fakeDropTarget();
+    const onFiles = vi.fn();
+    installFileDrop(target, { onFiles });
+    const over = dragEvent({ types: ['text/plain'] });
+    fire('dragover', over);
+    fire('drop', dragEvent({ types: ['text/plain'], files: [new File(['x'], 'x.mp4')] }));
+    expect(over.preventDefault).not.toHaveBeenCalled();
+    expect(onFiles).not.toHaveBeenCalled();
+    expect(dragHasFiles(dragEvent({ types: [] }))).toBe(false);
+  });
+
+  it('dispose retira todos los listeners', () => {
+    const { target, listeners, fire } = fakeDropTarget();
+    const onFiles = vi.fn();
+    const handle = installFileDrop(target, { onFiles });
+    expect(listeners.get('drop')).toHaveLength(1);
+    handle.dispose();
+    for (const type of ['dragenter', 'dragover', 'dragleave', 'drop']) {
+      expect(listeners.get(type)).toHaveLength(0);
+    }
+    fire('drop', dragEvent({ files: [new File(['x'], 'x.mp4')] }));
+    expect(onFiles).not.toHaveBeenCalled();
+  });
+
+  it('installDropGuard bloquea la navegación solo para drags de archivos', () => {
+    const listeners = new Map<string, ((event: DragEventLike) => void)[]>();
+    const guard = installDropGuard({
+      addEventListener: (type, listener) => {
+        listeners.set(type, [...(listeners.get(type) ?? []), listener]);
+      },
+      removeEventListener: (type, listener) => {
+        listeners.set(type, (listeners.get(type) ?? []).filter((l) => l !== listener));
+      },
+    });
+    const fire = (type: string, event: DragEventLike): void => {
+      for (const listener of listeners.get(type) ?? []) listener(event);
+    };
+    const fileDrop = dragEvent();
+    fire('drop', fileDrop);
+    expect(fileDrop.preventDefault).toHaveBeenCalled(); // no navigation
+    const internal = dragEvent({ types: ['text/plain'] });
+    fire('dragover', internal);
+    expect(internal.preventDefault).not.toHaveBeenCalled();
+    guard.dispose();
+    const after = dragEvent();
+    fire('drop', after);
+    expect(after.preventDefault).not.toHaveBeenCalled();
+  });
+});

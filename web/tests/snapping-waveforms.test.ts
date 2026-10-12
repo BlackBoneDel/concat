@@ -192,3 +192,80 @@ describe('waveforms', () => {
     void Rational.ZERO;
   });
 });
+
+// -- Fase 7+: la cache de waveforms sobrevive a un schema roto -------------
+
+import { MemoryKeyValue, type KeyValue } from '../src/storage/idb.ts';
+
+/** A backend that throws NotFoundError on every waveforms access (v2 schema). */
+function brokenBackend(): KeyValue {
+  const fail = (): never => {
+    const error = new Error('store not found: waveforms');
+    error.name = 'NotFoundError';
+    throw error;
+  };
+  return {
+    get: () => Promise.reject(new Error('NotFoundError')),
+    getAll: () => Promise.reject(new Error('NotFoundError')),
+    put: async () => {
+      fail();
+    },
+    delete: async () => {
+      fail();
+    },
+    count: async () => fail(),
+    clear: async () => {
+      fail();
+    },
+  };
+}
+
+describe('WaveformCache resilience (Fase 7+)', () => {
+  it('get devuelve null con un backend roto (store waveforms ausente)', async () => {
+    const cache = new WaveformCache(async () => brokenBackend());
+    expect(await cache.get('m1', 128)).toBeNull();
+  });
+
+  it('put y delete no propagan el error del backend roto', async () => {
+    const cache = new WaveformCache(async () => brokenBackend());
+    const data: WaveformData = {
+      mediaId: 'm1',
+      samplesPerPixel: 128,
+      data: Float32Array.from([0, 1]),
+      duration: 1,
+      channels: 1,
+    };
+    await expect(cache.put(data)).resolves.toBeUndefined();
+    await expect(cache.delete('m1')).resolves.toBeUndefined();
+  });
+
+  it('tolera un opener que rechaza (IndexedDB bloqueado)', async () => {
+    const cache = new WaveformCache(async () => {
+      throw new Error('indexedDB blocked');
+    });
+    expect(await cache.get('m1', 512)).toBeNull();
+    await expect(
+      cache.put({ mediaId: 'm1', samplesPerPixel: 512, data: new Float32Array(2), duration: 1, channels: 1 }),
+    ).resolves.toBeUndefined();
+  });
+
+  it('abre el backend una sola vez (memoizado)', async () => {
+    const opener = vi.fn(async () => new MemoryKeyValue() as KeyValue);
+    const cache = new WaveformCache(opener);
+    await cache.get('a', 128);
+    await cache.put({ mediaId: 'a', samplesPerPixel: 128, data: new Float32Array(2), duration: 1, channels: 1 });
+    await cache.get('a', 128);
+    expect(opener).toHaveBeenCalledTimes(1);
+  });
+
+  it('guarda bajo la clave mediaId_samplesPerPixel', async () => {
+    const backend = new MemoryKeyValue();
+    const cache = new WaveformCache(async () => backend);
+    await cache.put({ mediaId: 'k9', samplesPerPixel: 2048, data: Float32Array.from([0.5, 1]), duration: 2, channels: 1 });
+    const all = await backend.getAll<WaveformData>('waveforms');
+    expect(all).toHaveLength(1);
+    expect(all[0]!.mediaId).toBe('k9');
+    expect(await backend.get<WaveformData>('waveforms', 'k9_2048')).toMatchObject({ samplesPerPixel: 2048 });
+    expect(await cache.get('k9', 2048)).not.toBeNull();
+  });
+});

@@ -91,20 +91,42 @@ export class MediaStore {
     };
 
     const root = await this.opfsRoot();
-    if (root) {
-      const directory = await root.getDirectoryHandle(MEDIA_DIR, { create: true });
-      const handle = await directory.getFileHandle(id, { create: true });
-      const writable = await handle.createWritable();
-      await writable.write(file);
-      await writable.close();
-    } else {
-      // Fallback for browsers/private modes without OPFS: keep the bytes in
-      // memory for this session and say so in the record's name suffix only
-      // once (the UI surfaces the degraded mode through `hasOpfs`).
+    const stored = root ? await this.writeToOpfs(root, id, file) : false;
+    if (!stored) {
+      // Fallback for browsers/private modes without a usable OPFS write
+      // path — notably Safari 17, which exposes `navigator.storage
+      // .getDirectory()` but no `createWritable()` on the main thread:
+      // keep the bytes in memory for this session and report the degraded
+      // mode through `hasOpfs` (the UI warns once on boot).
       this.memoryBlobs.set(id, { blob: file, record });
+      this.opfs = null;
     }
     await this.backend.put(MEDIA_STORE, id, record);
     return record;
+  }
+
+  /**
+   * Writes one asset's bytes into OPFS.
+   * @param root the OPFS root.
+   * @param id the asset id (the file name under `media/`).
+   * @param file the bytes.
+   * @returns `false` when the write path is missing or failed — the caller
+   * falls back to the in-memory mirror.
+   */
+  private async writeToOpfs(root: FileSystemDirectoryHandle, id: string, file: Blob): Promise<boolean> {
+    try {
+      const directory = await root.getDirectoryHandle(MEDIA_DIR, { create: true });
+      const handle = await directory.getFileHandle(id, { create: true });
+      // Safari 17: OPFS exists but `createWritable` is worker-only —
+      // feature-detect instead of throwing a TypeError mid-import.
+      if (typeof handle.createWritable !== 'function') return false;
+      const writable = await handle.createWritable();
+      await writable.write(file);
+      await writable.close();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   /**

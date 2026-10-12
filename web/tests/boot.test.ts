@@ -191,3 +191,43 @@ describe('editor boot and demo checklist', () => {
     expect(before).toBe(3);
   });
 });
+
+// -- Fase 7+: drop capture + panel de diagnóstico cableados en el boot -----
+
+import { mountDebugPanel } from '../src/ui/debug-panel.ts';
+
+describe('Fase 7+ wiring', () => {
+  it('el timeline captura los drags de archivos del SO (sin navegación)', () => {
+    const panel = document.getElementById('timeline-panel');
+    expect(panel).not.toBeNull();
+    const event = new Event('dragover', { bubbles: true, cancelable: true });
+    Object.defineProperty(event, 'dataTransfer', {
+      value: { types: ['Files'], files: [], dropEffect: '' },
+    });
+    panel!.dispatchEvent(event);
+    expect(event.defaultPrevented).toBe(true);
+    // A drop outside any zone is neutralized by the window guard too.
+    const stray = new Event('drop', { bubbles: true, cancelable: true });
+    Object.defineProperty(stray, 'dataTransfer', { value: { types: ['Files'], files: [] } });
+    document.body.dispatchEvent(stray);
+    expect(stray.defaultPrevented).toBe(true);
+  });
+
+  it('arranca sin panel de diagnóstico; ?debug=1 lo monta', async () => {
+    expect(document.querySelector('.debug-panel')).toBeNull();
+    const panel = await mountDebugPanel(document.body, '?debug=1', {
+      userAgent: 'Mozilla/5.0 (Test) ConcatDebug/1.0',
+      probe: { canPlayType: () => '' },
+      storage: null,
+      indexedDb: false,
+      serviceWorker: null,
+      cacheKeys: async () => [],
+      webcodecs: { videoDecoder: false, videoEncoder: false },
+    });
+    expect(panel?.classList.contains('debug-panel')).toBe(true);
+    expect(document.querySelector('.debug-panel')).toBe(panel);
+    expect(panel?.textContent ?? '').toContain('Diagnóstico');
+    panel?.remove();
+    expect(document.querySelector('.debug-panel')).toBeNull();
+  });
+});

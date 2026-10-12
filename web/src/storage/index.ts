@@ -4,6 +4,7 @@
 /** The storage module: IndexedDB, OPFS media, projects, settings. */
 export {
   IndexedDbKeyValue,
+  KEY_VALUE_VERSION,
   MemoryKeyValue,
   openDatabase,
   openKeyValue,
