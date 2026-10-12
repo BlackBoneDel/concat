@@ -16,6 +16,7 @@ import type { ProjectDocument } from '../model/index.ts';
 import type { Json } from '../model/wire.ts';
 import { openKeyValue, type KeyValue } from './idb.ts';
 import { PROJECT_DB_NAME, PROJECT_STORE_NAME } from './media-store.ts';
+import { restorePersistedFonts, withPersistableFonts } from './font-persistence.ts';
 
 /** The persisted shape of a project. */
 export interface ProjectRecord {
@@ -67,7 +68,8 @@ export class ProjectStore {
     settings: DocumentSettings,
     id?: string,
   ): Promise<ProjectRecord> {
-    const wire = toDocument(settings, document);
+    // Fase 6 hook: keep the custom-font list (writer-owned `fonts` key).
+    const wire = toDocument(settings, withPersistableFonts(document));
     const record: ProjectRecord = {
       id: id ?? crypto.randomUUID(),
       name: settings.name,
@@ -90,7 +92,8 @@ export class ProjectStore {
     try {
       const document = fromDocument(record.document);
       if (!document) return null;
-      return { name: record.name, document };
+      // Fase 6 hook: put the custom-font list back in `extra.fonts`.
+      return { name: record.name, document: restorePersistedFonts(document) };
     } catch {
       return null;
     }

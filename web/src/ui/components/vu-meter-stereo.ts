@@ -260,6 +260,9 @@ export class VuMeterStereo {
    */
   attach(master: GainLike, context: unknown): void {
     if (this.disposed || !isMeterContext(context)) return;
+    // Fase 6 hook: export mixes on an OfflineAudioContext; never steal the
+    // live meter for it (it would freeze on a context that finishes).
+    if (typeof OfflineAudioContext !== 'undefined' && context instanceof OfflineAudioContext) return;
     this.tap?.dispose();
     try {
       this.tap = new StereoTap(master, context);

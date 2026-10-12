@@ -54,6 +54,12 @@ interface AttachedProxy {
 const THUMB_WIDTH = 160;
 const THUMB_HEIGHT = 90;
 
+/** Fase 6 hook: options of {@link MediaPool.getFrame}. */
+export interface FrameRequestOptions {
+  /** `auto` = proxy when enabled; `original` = never a proxy; `proxy` = only the proxy. */
+  quality?: 'auto' | 'original' | 'proxy';
+}
+
 /** Runtime media pool: decoders, frames and thumbnails. */
 export class MediaPool implements FramePool {
   private readonly assets = new Map<string, MediaAsset>();
@@ -63,6 +69,8 @@ export class MediaPool implements FramePool {
   private readonly fallback: MediaFallback | null;
   private readonly proxies = new Map<string, AttachedProxy>();
   private useProxies = true;
+  // Fase 6 hook: export forces original quality while it runs.
+  private forceOriginal = false;
 
   constructor(options: MediaPoolOptions = {}) {
     this.thumbnailStore = options.thumbnailStore ?? new MemoryThumbnailStore();
@@ -129,7 +137,15 @@ export class MediaPool implements FramePool {
    * @param sourceTime seconds into the media.
    * @returns a drawable frame, or `null`.
    */
-  async getFrame(id: string, sourceTime: Rational): Promise<RenderImage | null> {
+  async getFrame(id: string, sourceTime: Rational, options?: FrameRequestOptions): Promise<RenderImage | null> {
+    // Fase 6 hook: export asks for originals explicitly, or forces them
+    // process-wide while it runs (so no code path can sample a proxy).
+    const quality = options?.quality ?? 'auto';
+    if (quality === 'original' || (this.forceOriginal && quality !== 'proxy')) return this.getOriginalFrame(id, sourceTime);
+    if (quality === 'proxy') {
+      const attached = this.proxies.get(id);
+      return attached ? attached.decoder.getFrame(sourceTime) : null;
+    }
     const proxy = this.activeProxy(id);
     if (proxy) {
       const frame = await proxy.decoder.getFrame(sourceTime);
@@ -163,6 +179,48 @@ export class MediaPool implements FramePool {
         const asset = this.assets.get(id);
         return asset && asset.width > 0 ? { width: asset.width, height: asset.height } : null;
       },
+    };
+  }
+
+  /**
+   * Fase 6 hook: while `enabled`, {@link getFrame} ignores proxies (unless a
+   * caller asks for `quality: 'proxy'` explicitly). The export controller
+   * turns it on for the duration of an export and always turns it off.
+   * @param enabled whether originals are forced.
+   */
+  forceOriginalQuality(enabled: boolean): void {
+    this.forceOriginal = enabled;
+  }
+
+  /** Fase 6 hook: whether originals are currently forced. */
+  get originalQualityForced(): boolean {
+    return this.forceOriginal;
+  }
+
+  /**
+   * Fase 6 hook: whether the original of an asset can be decoded (an asset
+   * whose file went missing may still have a proxy).
+   * @param id the asset id.
+   * @returns `true` when a decoder for the original exists.
+   */
+  hasOriginal(id: string): boolean {
+    return this.decoders.has(id);
+  }
+
+  /**
+   * Fase 6 hook: the pool view the exporter renders from. Originals only;
+   * with `allowProxyFallback`, an asset without an original falls back to
+   * its proxy (off by default — the export then fails with `NO_MEDIA`).
+   * @param allowProxyFallback whether proxies may stand in for missing originals.
+   * @returns a {@link FramePool}.
+   */
+  exportFrames(allowProxyFallback = false): FramePool {
+    const originals = this.originalFrames();
+    if (!allowProxyFallback) return originals;
+    return {
+      getFrame: (id, sourceTime) =>
+        this.decoders.has(id) ? this.getOriginalFrame(id, sourceTime) : this.getFrame(id, sourceTime, { quality: 'proxy' }),
+      getSize: (id) => originals.getSize(id),
     };
   }
 

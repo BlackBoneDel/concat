@@ -525,6 +525,67 @@ export class EditSession extends EditorSession {
   private readonly stub: DocumentClip | null = null;
 
   /** Reads a property's current Json value (for op old values). */
+  // -- Fase 6 hook: export range (in/out points) ------------------------------
+  // Session state, not document state: marking a range is not an edit, so it
+  // stays out of the undo stack and the saved project.
+
+  private exportIn: Rational | null = null;
+  private exportOut: Rational | null = null;
+
+  /** Fase 6 hook: called after the in/out range changes. */
+  onExportRangeChange: (() => void) | null = null;
+
+  /** Fase 6 hook: the export in-point, or `null` (timeline start). */
+  get inPoint(): Rational | null {
+    return this.exportIn;
+  }
+
+  /** Fase 6 hook: the export out-point, or `null` (timeline end). */
+  get outPoint(): Rational | null {
+    return this.exportOut;
+  }
+
+  /**
+   * Fase 6 hook: marks the in-point (`I`). An out-point at or before it is
+   * cleared so the range never inverts.
+   * @param time the timeline instant, or `null` to clear.
+   */
+  setInPoint(time: Rational | null): void {
+    this.exportIn = time && time.isNegative() ? Rational.ZERO : time;
+    if (this.exportIn && this.exportOut && this.exportOut.compare(this.exportIn) <= 0) this.exportOut = null;
+    this.onExportRangeChange?.();
+  }
+
+  /**
+   * Fase 6 hook: marks the out-point (`O`). An in-point at or after it is
+   * cleared so the range never inverts.
+   * @param time the timeline instant, or `null` to clear.
+   */
+  setOutPoint(time: Rational | null): void {
+    this.exportOut = time && time.isNegative() ? Rational.ZERO : time;
+    if (this.exportIn && this.exportOut && this.exportIn.compare(this.exportOut) >= 0) this.exportIn = null;
+    this.onExportRangeChange?.();
+  }
+
+  /** Fase 6 hook: clears both points. */
+  clearExportRange(): void {
+    this.exportIn = null;
+    this.exportOut = null;
+    this.onExportRangeChange?.();
+  }
+
+  /**
+   * Fase 6 hook: the range an export covers — the in/out points clamped to
+   * the edit, defaulting to the whole timeline.
+   * @returns `{ start, end }` (`end` equals `start` for an empty edit).
+   */
+  exportRange(): { start: Rational; end: Rational } {
+    const duration = this.duration();
+    const start = (this.exportIn ?? Rational.ZERO).clampTo(Rational.ZERO, duration);
+    const end = (this.exportOut ?? duration).clampTo(start, duration);
+    return { start, end };
+  }
+
   private propertyOf(clip: DocumentClip, property: string): Json {
     switch (property) {
       case 'name':

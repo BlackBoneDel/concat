@@ -2,7 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 /// <reference types="vitest/config" />
-import { createReadStream, cpSync, existsSync, statSync } from 'node:fs';
+import { createReadStream, cpSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { extname, join, normalize, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { defineConfig, type Plugin } from 'vite';
@@ -58,12 +58,47 @@ function vendorAssets(): Plugin {
   };
 }
 
+/**
+ * Fase 6: fills `dist/sw.js` (copied from `public/`) with the build id and
+ * the hashed bundle files to precache. Source maps and the FFmpeg.wasm
+ * runtime (~30 MB, only needed without WebCodecs) are left to the
+ * network-first runtime cache instead of the install step.
+ */
+function pwaPrecache(): Plugin {
+  let outDir = 'dist';
+  let building = false;
+  const assets = new Set<string>();
+  return {
+    name: 'concat-pwa-precache',
+    apply: 'build',
+    configResolved(config) {
+      outDir = resolve(config.root, config.build.outDir);
+      building = config.command === 'build' && !process.env['VITEST'];
+    },
+    generateBundle(_options, bundle) {
+      for (const fileName of Object.keys(bundle)) {
+        if (fileName.endsWith('.map') || fileName.endsWith('.wasm') || fileName.startsWith('vendor/')) continue;
+        assets.add(`./${fileName}`);
+      }
+    },
+    closeBundle() {
+      const file = join(outDir, 'sw.js');
+      if (!building || !existsSync(file)) return;
+      const buildId = Date.now().toString(36);
+      const source = readFileSync(file, 'utf8')
+        .replace('__CONCAT_BUILD_ID__', buildId)
+        .replace('/*__CONCAT_PRECACHE__*/ []', JSON.stringify([...assets].sort()));
+      writeFileSync(file, source);
+    },
+  };
+}
+
 // Local-only by design: the whole app runs in the user's browser and this
 // dev server binds to 0.0.0.0 so sandboxed previews can reach it. No CDN,
 // no analytics, no external requests from the app itself.
 export default defineConfig({
   base: './',
-  plugins: [vendorAssets()],
+  plugins: [vendorAssets(), pwaPrecache()],
   server: {
     host: '0.0.0.0',
     port: 5173,

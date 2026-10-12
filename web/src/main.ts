@@ -11,6 +11,10 @@
  * resolver (+ gate worklet), vision pipeline (keying, grading, LUTs),
  * bulk import with fingerprints, relinking and subtitles — all through the
  * {@link MediaToolkit} registered as the UI's media tools.
+ *
+ * Fase 6 wiring: offline export (Ctrl+E, I/O marks), the shortcut sheet
+ * (`?`), storage manager, project packages and the installable PWA — all
+ * through `app/production.ts`, every dialog loaded on demand.
  */
 
 import { Rational } from './core/rational.ts';
@@ -52,6 +56,21 @@ import { FontStore } from './storage/font-store.ts';
 import { IndexedDbKeyValue } from './storage/idb.ts';
 import { VuMeterStereo } from './ui/components/vu-meter-stereo.ts';
 import { setStudioServices } from './ui/studio-services.ts';
+// Fase 6: export, PWA, storage manager, project packages.
+import { createProductionServices } from './app/production.ts';
+import { InstallPrompt } from './pwa/install-prompt.ts';
+import { registerServiceWorker } from './pwa/sw-register.ts';
+import { setProductionServices } from './ui/production-services.ts';
+import { actionToast } from './ui/action-toast.ts';
+import { EXPORT_SHORTCUT } from './ui/header-bar.ts';
+import { isTypingTarget } from './ui/interactions/keyboard-shortcuts.ts';
+import { parseCube, toCube } from './media/vision/lut-loader.ts';
+import { fontFileName, OpfsFontFiles } from './storage/font-store.ts';
+import { openProxyStorage } from './storage/proxy-store.ts';
+import { waveformCache } from './media/waveform-generator.ts';
+import { formatEta } from './export/bitrate-estimator.ts';
+import type { OpenedPackage } from './storage/project-package.ts';
+import type { StorageCategory } from './ui/modals/storage-manager-modal.ts';
 import {
   HeaderBar,
   InspectorPanel,
@@ -91,6 +110,9 @@ class CanvasRef implements RenderTarget {
     return this.canvas;
   }
 }
+
+/** Fase 6: the storage manager source without its UI callbacks. */
+type ProductionStorage = Omit<import('./ui/modals/storage-manager-modal.ts').StorageManagerSource, 'confirm' | 'notify'>;
 
 /** Subtitle files routed to the subtitle importer. */
 const SUBTITLE_FILE = /\.(srt|vtt)$/i;
@@ -132,6 +154,10 @@ class EditorApp implements AppContext {
   private mediaPanel: MediaPanel | null = null;
   private inspectorPanel: InspectorPanel | null = null;
   private renderTimer: ReturnType<typeof setTimeout> | null = null;
+  /** Fase 6: the browser's install offer. */
+  private readonly installPrompt = new InstallPrompt();
+  /** Fase 6: the I/O range badge in the header. */
+  private rangeBadge: HTMLElement | null = null;
   private autosaveTimer: ReturnType<typeof setInterval> | null = null;
 
   constructor() {
@@ -202,6 +228,7 @@ class EditorApp implements AppContext {
     this.header.syncProxyToggle();
     this.installEffectHooks(audioContext);
     this.installStudio(layout.header);
+    this.installProduction(layout.header);
 
     // Shortcuts.
     this.wireShortcuts();
@@ -474,6 +501,249 @@ class EditorApp implements AppContext {
       this.videoEffects?.dispose();
       this.reverbIrs.dispose();
     }, { once: true });
+  }
+
+  /**
+   * Fase 6: export, in/out marks, shortcut sheet, storage manager, project
+   * packages and the PWA.
+   * @param header the header bar root (hosts the range badge).
+   */
+  private installProduction(header: HTMLElement): void {
+    const previousChanged = this.session.onChanged;
+    this.session.onChanged = () => {
+      previousChanged();
+      document.dispatchEvent(new CustomEvent('session-changed'));
+    };
+    const badge = document.createElement('button');
+    badge.type = 'button';
+    this.rangeBadge = badge;
+    this.rangeBadge.className = 'btn btn-ghost btn-small range-badge';
+    this.rangeBadge.hidden = true;
+    this.rangeBadge.title = 'Rango de exportación (I / O). Pulsa para borrarlo (Alt+X).';
+    this.rangeBadge.addEventListener('click', () => this.session.clearExportRange());
+    const actions = header.querySelector('.header-actions');
+    (actions ?? header).insertBefore(this.rangeBadge, header.querySelector('.header-export'));
+    this.session.onExportRangeChange = () => this.syncRangeBadge();
+
+    const services = createProductionServices({
+      getDocument: () => this.session.document,
+      documentSettings: () => this.session.documentSettings(),
+      projectName: () => this.session.name,
+      timelineSeconds: () => this.session.duration().asNumber(),
+      clipCount: () => this.session.clips().length,
+      markedRange: () => (this.session.inPoint || this.session.outPoint ? this.session.exportRange() : null),
+      sequence: () => ({ width: this.session.video.width, height: this.session.video.height, fps: this.session.frameRate.fps().asNumber() }),
+      media: {
+        exportFrames: (allowProxy) => this.pool.exportFrames(allowProxy),
+        hasOriginal: (id) => this.pool.hasOriginal(id),
+        hasProxy: (id) => this.pool.hasProxy(id),
+        forceOriginalQuality: (enabled) => this.pool.forceOriginalQuality(enabled),
+        getAudioBuffer: (id) => this.pool.getAudioBuffer(id),
+      },
+      ffmpeg: () => (typeof WebAssembly === 'object' && typeof Worker !== 'undefined' && !this.ffmpeg.unavailable ? this.ffmpeg : null),
+      assets: {
+        readMedia: (id) => this.mediaStore.readFile(id),
+        readFont: async (font) => {
+          const bytes = await this.fontStore.read(font);
+          return bytes ? new Blob([bytes]) : null;
+        },
+        lutCube: (id) => {
+          const lut = this.media.luts.sessionLuts().find((item) => item.id === id);
+          return lut ? toCube(lut) : null;
+        },
+      },
+      installPackage: (opened) => this.installPackage(opened),
+      storage: this.storageSource(),
+      install: this.installPrompt,
+      notify: (kind, title, message) => this.notifications[kind](title, message),
+      confirm: (title, message, label) => this.notifications.confirm(title, message, label),
+      beforeExport: () => {
+        if (this.player.isPlaying) this.player.pause();
+      },
+    });
+    setProductionServices(services);
+    document.dispatchEvent(new CustomEvent('production-ready'));
+    this.installPrompt.onChange(() => {
+      if (this.installPrompt.canInstall) {
+        actionToast(this.notifications, {
+          type: 'info',
+          title: 'Instala Concat',
+          message: 'Úsalo como aplicación, también sin conexión.',
+          actionLabel: 'Instalar',
+          onAction: () => services.install(),
+          duration: 10_000,
+        });
+      }
+    });
+
+    // Shortcuts (ignored while typing; never while a dialog is open).
+    const free = (event: KeyboardEvent): boolean => !isTypingTarget(event.target) && document.querySelector('.modal-backdrop') === null;
+    this.shortcuts.bind(EXPORT_SHORTCUT, (event) => {
+      if (!isTypingTarget(event.target)) services.openExport();
+    });
+    this.shortcuts.bind('I', (event) => {
+      if (free(event)) this.session.setInPoint(this.player.currentTime);
+    });
+    this.shortcuts.bind('O', (event) => {
+      if (free(event)) this.session.setOutPoint(this.player.currentTime);
+    });
+    this.shortcuts.bind('Alt+X', (event) => {
+      if (free(event)) this.session.clearExportRange();
+    });
+    for (const combo of ['?', 'Shift+?']) {
+      this.shortcuts.bind(combo, (event) => {
+        if (free(event)) services.openShortcuts();
+      });
+    }
+
+    // Service worker: production builds only.
+    void registerServiceWorker({
+      onOfflineReady: () => this.notifications.success('Listo sin conexión', 'Concat ya funciona sin red en este navegador.'),
+      onNeedRefresh: (update) =>
+        actionToast(this.notifications, {
+          type: 'info',
+          title: 'Nueva versión disponible',
+          message: 'Recarga para actualizar. Guarda antes si tienes cambios.',
+          actionLabel: 'Recargar',
+          onAction: () => {
+            void this.saveProjectSilently().finally(update);
+          },
+        }),
+      onError: (error) => console.warn('Service worker no registrado', error),
+    }).then((result) => window.addEventListener('pagehide', () => result.dispose(), { once: true }));
+    window.addEventListener('pagehide', () => this.installPrompt.dispose(), { once: true });
+  }
+
+  /** Fase 6: reflects the I/O marks in the header badge. */
+  private syncRangeBadge(): void {
+    const badge = this.rangeBadge;
+    if (!badge) return;
+    const marked = this.session.inPoint !== null || this.session.outPoint !== null;
+    badge.hidden = !marked;
+    if (marked) {
+      const range = this.session.exportRange();
+      badge.textContent = `I ${formatEta(range.start.asNumber())} → O ${formatEta(range.end.asNumber())}`;
+      badge.setAttribute('aria-label', `Rango de exportación de ${formatEta(range.start.asNumber())} a ${formatEta(range.end.asNumber())}. Pulsa para borrarlo.`);
+    }
+  }
+
+  /** Fase 6: installs an opened project package and opens its project. */
+  private async installPackage(opened: OpenedPackage): Promise<void> {
+    for (const [id, file] of opened.media) {
+      if (this.pool.hasOriginal(id) || (await this.mediaStore.get(id))) continue;
+      const name = opened.document.media.find((item) => item.id === id)?.name ?? file.name;
+      try {
+        await this.pool.addMedia(file, id, name);
+        const info = this.pool.getDecoder(id)?.mediaInfo;
+        if (info) await this.mediaStore.importFile(file, info, id, name);
+        void this.generateWaveforms(file, id);
+      } catch (error) {
+        this.reportError(`No se pudo importar ${name}`, error);
+      }
+    }
+    const fontFiles = new OpfsFontFiles();
+    for (const [path, blob] of opened.fonts) await fontFiles.write(fontFileName(path), blob);
+    for (const [id, cube] of opened.luts) {
+      try {
+        this.media.luts.add({ ...parseCube(cube, id), id });
+      } catch (error) {
+        this.reportError('LUT del paquete', error);
+      }
+    }
+    this.history.clear();
+    this.session.name = opened.name;
+    this.session.loadDocument(opened.document);
+    this.session.clearExportRange();
+    this.projectId = null;
+    this.selectedClipId = null;
+    this.session.dirty = true;
+    this.refreshAll();
+    this.requestRender();
+    void this.media.refreshOffline();
+    document.dispatchEvent(new CustomEvent('media-library-changed'));
+  }
+
+  /** Fase 6: the storage manager's data and actions. */
+  private storageSource(): ProductionStorage {
+    const waveformsDb = (): Promise<import('./storage/idb.ts').KeyValue> => openKeyValue('ConcatMediaDB', ['files', 'waveforms']);
+    const referencedMedia = async (): Promise<Set<string>> => {
+      const ids = new Set(this.session.document.media.map((item) => item.id));
+      for (const summary of await this.projectStore.listProjects()) {
+        const loaded = await this.projectStore.loadProject(summary.id);
+        for (const item of loaded?.document.media ?? []) ids.add(item.id);
+      }
+      return ids;
+    };
+    return {
+      estimate: async () => {
+        if (typeof navigator === 'undefined' || !navigator.storage || typeof navigator.storage.estimate !== 'function') return null;
+        const estimate = await navigator.storage.estimate();
+        return { usage: estimate.usage ?? 0, quota: estimate.quota ?? 0 };
+      },
+      breakdown: async () => {
+        const out: StorageCategory[] = [];
+        const media = await this.mediaStore.list();
+        out.push({ id: 'media', label: 'Medios originales', bytes: media.reduce((sum, record) => sum + record.fileSize, 0), count: media.length });
+        try {
+          const proxies = await (await openProxyStorage()).records.list();
+          out.push({ id: 'proxies', label: 'Proxies', bytes: proxies.reduce((sum, record) => sum + record.fileSize, 0), count: proxies.length });
+        } catch {
+          out.push({ id: 'proxies', label: 'Proxies', bytes: 0, count: 0 });
+        }
+        const fonts = projectFonts(this.session.document);
+        let fontBytes = 0;
+        for (const font of fonts) fontBytes += (await this.fontStore.read(font))?.byteLength ?? 0;
+        out.push({ id: 'fonts', label: 'Fuentes del proyecto', bytes: fontBytes, count: fonts.length });
+        const waves = await (await waveformsDb()).getAll<{ data?: { byteLength?: number } }>('waveforms');
+        out.push({ id: 'waveforms', label: 'Formas de onda', bytes: waves.reduce((sum, wave) => sum + (wave.data?.byteLength ?? 0), 0), count: waves.length });
+        const projects = await this.projectStore.listProjects();
+        out.push({ id: 'projects', label: 'Proyectos guardados', bytes: projects.reduce((sum, project) => sum + project.fileSize, 0), count: projects.length });
+        return out;
+      },
+      persisted: async () => (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.persisted === 'function' ? navigator.storage.persisted() : false),
+      requestPersist: async () => (typeof navigator !== 'undefined' && navigator.storage && typeof navigator.storage.persist === 'function' ? navigator.storage.persist() : false),
+      clearProxies: () => this.media.clearProxies(),
+      clearWaveforms: async () => {
+        await (await waveformsDb()).clear('waveforms');
+      },
+      clearOrphans: async () => {
+        const keep = await referencedMedia();
+        let removed = 0;
+        for (const record of await this.mediaStore.list()) {
+          if (keep.has(record.id)) continue;
+          await this.mediaStore.deleteFile(record.id);
+          await waveformCache.delete(record.id).catch(() => undefined);
+          this.pool.removeMedia(record.id);
+          removed += 1;
+        }
+        if (removed > 0) document.dispatchEvent(new CustomEvent('media-library-changed'));
+        return removed;
+      },
+      clearAll: async () => {
+        await this.media.clearProxies();
+        await this.mediaStore.clearAll();
+        await this.projectStore.clearAll();
+        await (await waveformsDb()).clear('waveforms');
+        const builtin = new Set(this.presets.builtins().map((preset) => preset.id));
+        for (const preset of await this.presets.list()) if (!builtin.has(preset.id)) await this.presets.delete(preset.id);
+        try {
+          const root = await navigator.storage.getDirectory();
+          await root.removeEntry('fonts', { recursive: true }).catch(() => undefined);
+        } catch {
+          // No OPFS: nothing stored there.
+        }
+        for (const key of Object.keys(localStorage)) if (key.startsWith('concat')) localStorage.removeItem(key);
+        this.history.clear();
+        this.session.name = 'Untitled';
+        this.session.loadDocument(createProjectDocument());
+        this.session.clearExportRange();
+        this.projectId = null;
+        this.selectedClipId = null;
+        this.session.dirty = false;
+        this.refreshAll();
+        this.requestRender();
+      },
+    };
   }
 
   /** Fase 5: an edit from a dialog (history + refresh + autosave). */

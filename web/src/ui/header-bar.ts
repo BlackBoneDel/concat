@@ -16,6 +16,10 @@ import { Modal } from './modal.ts';
 import type { AppContext } from './app-context.ts';
 import markUrl from '../assets/concat-mark.png';
 import { getMediaTools } from './media-tools.ts';
+import { getProductionServices } from './production-services.ts';
+
+/** Fase 6 shortcut of the export dialog (bound in main.ts). */
+export const EXPORT_SHORTCUT = 'Ctrl+E';
 
 /** Fase 4 shortcut of the proxy toggle (bound in main.ts). */
 export const PROXY_TOGGLE_SHORTCUT = 'Ctrl+Shift+P';
@@ -34,6 +38,8 @@ export class HeaderBar {
   private readonly saveState: HTMLElement;
   private readonly projectName: HTMLElement;
   private readonly proxyToggle: HTMLButtonElement;
+  /** Fase 6 hook: the Export button. */
+  private readonly exportButton: HTMLButtonElement;
 
   /**
    * @param root the header element.
@@ -63,7 +69,12 @@ export class HeaderBar {
     menus.appendChild(this.menuButton('Archivo', () => this.openFileMenu()));
     menus.appendChild(this.menuButton('Edición', () => this.openEditMenu()));
     menus.appendChild(this.menuButton('Ajustes', () => this.openSettingsModal()));
-    menus.appendChild(this.menuButton('Atajos', () => this.openShortcutsModal()));
+    // Fase 6 hook: the searchable shortcut sheet when installed.
+    menus.appendChild(this.menuButton('Atajos', () => {
+      const production = getProductionServices();
+      if (production) production.openShortcuts();
+      else this.openShortcutsModal();
+    }));
     this.root.appendChild(menus);
 
     // Project identity.
@@ -109,8 +120,20 @@ export class HeaderBar {
         });
       }),
     );
+    // Fase 6 hook: Export (Ctrl/Cmd+E), disabled while the timeline is empty.
+    this.exportButton = document.createElement('button');
+    this.exportButton.type = 'button';
+    this.exportButton.className = 'btn btn-primary btn-small header-export';
+    this.exportButton.textContent = 'Exportar';
+    this.exportButton.title = `Exportar vídeo (${EXPORT_SHORTCUT})`;
+    this.exportButton.setAttribute('aria-keyshortcuts', 'Control+E Meta+E');
+    this.exportButton.addEventListener('click', () => getProductionServices()?.openExport());
+    actions.appendChild(this.exportButton);
     this.root.appendChild(actions);
 
+    for (const name of ['timeline-changed', 'session-changed', 'production-ready']) {
+      document.addEventListener(name, () => this.syncExport());
+    }
     document.addEventListener('project-changed', () => this.sync());
     document.addEventListener('media-proxy-changed', () => this.syncProxyToggle());
     this.sync();
@@ -124,8 +147,17 @@ export class HeaderBar {
     this.proxyToggle.setAttribute('aria-pressed', String(tools?.proxiesEnabled ?? false));
   }
 
+  /** Fase 6 hook: enables Export only when there is something to export. */
+  syncExport(): void {
+    const production = getProductionServices();
+    const enabled = production?.canExport() ?? false;
+    this.exportButton.disabled = !enabled;
+    this.exportButton.title = enabled ? `Exportar vídeo (${EXPORT_SHORTCUT})` : 'Añade clips a la línea de tiempo para exportar';
+  }
+
   /** Reflects name and dirty state. */
   sync(): void {
+    this.syncExport();
     this.projectName.textContent = this.ctx.session.name;
     this.saveState.textContent = this.ctx.session.dirty ? 'Cambios sin guardar' : 'Guardado';
     this.saveState.classList.toggle('dirty', this.ctx.session.dirty);
@@ -176,6 +208,16 @@ export class HeaderBar {
       list.appendChild(this.menuItem('Cargar LUT…', '.cube', () => this.pickFile('.cube', (file) => void tools.importLut(file))));
       list.appendChild(this.menuItem('Gestor de proxies…', PROXY_TOGGLE_SHORTCUT + ' alterna', () => tools.openProxyManager()));
       list.appendChild(this.menuItem('Medios sin conexión…', '', () => tools.openRelink()));
+    }
+    // Fase 6 entries.
+    const production = getProductionServices();
+    if (production) {
+      const exportItem = this.menuItem('Exportar vídeo…', EXPORT_SHORTCUT, () => production.openExport());
+      if (exportItem instanceof HTMLButtonElement) exportItem.disabled = !production.canExport();
+      list.appendChild(exportItem);
+      list.appendChild(this.menuItem('Paquete de proyecto (.zip)…', '', () => production.openProjectPackage()));
+      list.appendChild(this.menuItem('Almacenamiento local…', '', () => production.openStorageManager()));
+      if (production.canInstall()) list.appendChild(this.menuItem('Instalar Concat como aplicación', '', () => production.install()));
     }
     this.openMenu = new Modal('Archivo', list);
   }

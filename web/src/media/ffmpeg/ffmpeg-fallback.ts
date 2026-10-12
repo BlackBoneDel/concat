@@ -532,6 +532,26 @@ export class FFmpegFallback {
     return this.transcode(input, { format: 'webm', videoCodec: 'libvpx', audioCodec: 'libvorbis', videoBitrate: 2_500_000, audioBitrate: 128_000, ...target });
   }
 
+  /**
+   * Fase 6 hook: runs an arbitrary command with several named inputs
+   * (mounted under `/input/`) and collects named outputs from `/output/` —
+   * the export fallback muxes rendered frames and the mix this way.
+   * Serialized with every other command.
+   * @param args ffmpeg argv (without the leading `ffmpeg`).
+   * @param inputs files to mount, by name.
+   * @param outputs output file names to read back.
+   * @returns exit code, log and outputs.
+   */
+  execute(args: string[], inputs: { name: string; data: Blob }[], outputs: string[]): Promise<ExecResult> {
+    const task = async (): Promise<ExecResult> => {
+      await this.init();
+      return this.client.request<ExecResult>('exec', { args, inputs, outputs, timeoutMs: -1, probe: false }, [], (value) => this.onProgress?.(value));
+    };
+    const next = this.queue.then(task, task);
+    this.queue = next.catch(() => undefined);
+    return next;
+  }
+
   /** Unloads the core now. */
   terminate(): void {
     this.client.terminate('FFmpeg descargado');

@@ -1,4 +1,4 @@
-# Concat Web — Fase 5: keyframes visuales, efectos, titulación y presets
+# Concat Web — editor de vídeo 100% local (Fases 1–6)
 
 Port of [`jub0t/Concat`](https://github.com/jub0t/Concat) (the open-source,
 cross-platform video editor) to a **100% local web application**. No servers,
@@ -56,6 +56,118 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 9. **Rhythm** — autosave every 30s + restore on reopen, undo per gesture,
    real-time canvas preview, all colors from theme variables, full keyboard
    shortcuts that never fire while typing.
+
+## Fase 6 — exportación offline, PWA instalable y pulido de producción
+
+Concat exporta en el propio navegador: no sube nada a ningún servidor.
+La pestaña renderiza cada fotograma a partir de los **originales**, los codifica
+con WebCodecs y los multiplexa con muxers MP4, WebM y GIF propios. Todo ese
+código está en `src/export/` y se carga bajo demanda.
+
+| Módulo | Qué hace |
+|---|---|
+| `types.ts` | `ExportConfig`/`ExportProgress`/`ExportResult`, `ExportError` con los códigos `ABORTED`, `ENCODER_UNSUPPORTED`, `MUX_FAILED`, `OUT_OF_MEMORY`, `NO_MEDIA`, `INVALID_RANGE` y `UNKNOWN`, y validación de la configuración. |
+| `export-presets.ts` | YouTube 1080p y 4K, TikTok/Reels 9:16, Instagram 1:1, Pro 60 fps, Web ligero (WebM VP9 + Opus), GIF corto y Máster 15 Mbps. Incluye `applyPreset` y `estimateOutputBytes`. |
+| `bitrate-estimator.ts` | Tamaño estimado y helpers `formatBytes` («12.4 MB») y `formatEta` («00:03:21»). |
+| `frame-clock.ts` | Reloj **solo con `Rational`**: `totalFrames = floor((fin − inicio) · fps)` y el timestamp en µs se deriva del índice del fotograma, sin acumular deriva. |
+| `offline-renderer.ts` | Renderiza en `OffscreenCanvas` con el compositor de la Fase 2. Hace letterbox, quema los subtítulos y crea `VideoFrame` con el timestamp en µs. La vista previa mide ≤ 480 px y nunca hay más de 2 fotogramas en vuelo. |
+| `audio-exporter.ts` | `OfflineAudioContext` a 48 kHz estéreo con todo el stack de efectos de audio de la Fase 5. |
+| `video-encoder-pool.ts` / `audio-encoder-pool.ts` | Codecs `avc1.42E01E`/`avc1.640028`, `vp09.00.10.08` y `av01.0.04M.08`, siempre comprobados con `isConfigSupported`. Usan `latencyMode: 'quality'` y un keyframe cada 2 s. Audio en `mp4a.40.2` y `opus`. |
+| `mp4-muxer-adapter.ts`, `webm-muxer-adapter.ts`, `packet-store.ts` | Muxers propios (sin dependencias). Los paquetes se guardan en streaming, en trozos, y se ensamblan al final. |
+| `gif-exporter.ts` | Escribe GIF89a con paleta de 256 colores, Floyd-Steinberg opcional y `delay = round(1000/fps)`. Avisa si el clip pasa de 30 s. |
+| `ffmpeg-mux-fallback.ts` | Usa el FFmpeg.wasm local de la Fase 4 cuando faltan WebCodecs (Firefox/Safari). |
+| `export-controller.ts` | Recorre las fases preparando → renderizando → codificando audio → multiplexando → finalizando → hecho/cancelado/error. Calcula la ETA como fotogramas restantes / max(fps, 0,01). `dispose()` libera todo. |
+
+**Memoria y cancelación.** Cada `VideoFrame`, `AudioData` e `ImageBitmap` se
+cierra en cuanto deja de usarse, y los encoders reciben contrapresión. El
+`AbortController` llega a todas las etapas: al cancelar se cierran los
+encoders, se termina el worker de FFmpeg y se libera la calidad «original»
+forzada del pool. No quedan workers huérfanos ni locks de OPFS. Si de un medio
+**solo existe el proxy**, el export falla con `NO_MEDIA`. La opción «usar
+proxies si falta el original» existe, pero viene desactivada.
+
+**Diálogo de exportación (Ctrl/Cmd+E).**
+- Vistas: configuración → progreso (vista previa, fps, ETA y fase anunciada por `aria-live`) → hecho o error.
+- El error viene con una sugerencia según su código.
+- Rango: toda la línea de tiempo o entrada/salida, que se marcan con **I** y **O** y se borran con **Alt+X**. El rango marcado aparece como insignia en la cabecera.
+- Descarga: con `showSaveFilePicker` si está disponible; si no, con `<a download>`, y la URL se revoca a los 60 s.
+- Cancelar pide confirmación. Un clic fuera nunca cierra el diálogo. Tiene focus trap.
+- Recuerda el último preset (`localStorage`).
+
+### Matriz de compatibilidad (Fase 6)
+
+| Navegador | MP4 H.264 + AAC | WebM VP9/AV1 + Opus | GIF | Instalación PWA |
+|---|---|---|---|---|
+| Chrome / Edge 113+ | WebCodecs (hardware si existe) | WebCodecs | ✔ | ✔ (botón y menú Archivo) |
+| Firefox 120+ | FFmpeg.wasm (más lento) | FFmpeg.wasm (VP8/VP9 + Opus) | ✔ | — (funciona offline igualmente) |
+| Safari 17+ | WebCodecs parcial o FFmpeg.wasm | según `isConfigSupported` | ✔ | «Añadir a pantalla de inicio» |
+
+El diálogo comprueba la configuración antes de empezar y avisa con un mensaje
+claro cuando el navegador no puede codificarla.
+
+### PWA
+
+- `public/manifest.json`: standalone, `theme_color #14161b`, iconos 192/512 y *maskable*, y *file handler* para `.concatpkg.zip`.
+- `public/sw.js` es **network-first**. Solo atiende los GET del mismo origen e ignora las peticiones con `Range`. Si no hay red, sirve la copia en caché y, para las navegaciones, `index.html` o, en su defecto, `offline.html`.
+- El build sustituye `__CONCAT_BUILD_ID__` y la lista de precache con los archivos reales del bundle; el plugin es `pwaPrecache` en `vite.config.ts`. Vite copia `public/` a `dist/`.
+- `src/pwa/sw-register.ts` solo registra el SW en producción. Si hay una versión nueva, muestra un toast «Nueva versión disponible · Recargar» que guarda el proyecto antes de aplicar `SKIP_WAITING`. También avisa con «Listo sin conexión».
+- `src/pwa/install-prompt.ts` captura `beforeinstallprompt` y ofrece «Instalar» en un toast y en el menú Archivo.
+
+### Paquete de proyecto (`.concatpkg.zip`)
+
+En Archivo → Paquete de proyecto se genera un ZIP propio (CRC-32 + SHA-256,
+`src/storage/zip.ts`) con este contenido:
+- `project.concat.json`;
+- `media/` (opcional);
+- `fonts/`;
+- `luts/` (`.cube`);
+- `manifest.json` con los checksums.
+
+Al abrirlo se verifican los checksums. Después se importan los medios a
+OPFS y se instalan las fuentes y los LUTs antes de cargar el proyecto. Las
+fuentes personalizadas también se conservan al guardar con normalidad
+(`font-persistence.ts`).
+
+### Gestor de almacenamiento
+
+Archivo → Almacenamiento local muestra:
+- uso y cuota (`navigator.storage.estimate`);
+- el desglose de medios, proxies, fuentes, formas de onda y proyectos;
+- el botón «Hacer persistente».
+
+Las acciones de borrado piden confirmación:
+- **Borrar proxies** y **borrar formas de onda** se regeneran solos, así que piden **una** confirmación.
+- **Borrar medios huérfanos** (los que no usa el proyecto abierto ni ningún proyecto guardado) y **borrar todo** piden **doble confirmación**.
+
+### Atajos (pulsa `?`)
+
+| Atajo | Acción |
+|---|---|
+| Ctrl/Cmd+E | Exportar vídeo |
+| I / O | Punto de entrada / salida de exportación |
+| Alt+X | Borrar entrada/salida |
+| ? | Hoja de atajos con buscador |
+| Espacio, ←/→ | Reproducción y paso a paso |
+| V, C, B, N, Y, U | Herramientas de la línea de tiempo |
+| Ctrl+Z / Ctrl+Shift+Z | Deshacer / rehacer |
+| Ctrl+Shift+P | Previsualizar con proxies (Fase 4) |
+
+La lista completa está en el propio diálogo (`ui/modals/shortcuts-modal.ts`).
+
+### Tests y métricas (Fase 6)
+
+- **799 tests en 86 archivos.** Los 696 previos siguen sin cambios. Las suites nuevas son `export-basics`, `export-muxers`, `export-gif`, `export-pipeline`, `export-controller`, `export-browser`, `export-ui`, `project-package` y `pwa-register`.
+- Cobertura de `src/export/`: **97,4 % de líneas / 86,1 % de ramas** (`npx vitest run --coverage`).
+- Bundle inicial: **≈153 KB gzip** (< 180 KB). Exportación, GIF, paquete y diálogos van en chunks bajo demanda.
+
+### Checklist demo de la Fase 6
+
+1. Importa un vídeo, ponlo en la línea de tiempo y pulsa **Ctrl+E**. Elige «YouTube 1080p» → Exportar. Verás la vista previa, los fps y la ETA, y al terminar podrás descargar el `.mp4`.
+2. Marca **I** y **O**, elige «Entrada/salida» en el rango y exporta con el preset «GIF corto».
+3. Empieza una exportación y pulsa Escape: pide confirmación y, al aceptar, se cancela sin dejar recursos colgados.
+4. Archivo → Paquete de proyecto → Exportar. Luego ábrelo en otra ventana privada con «Abrir paquete».
+5. Archivo → Almacenamiento local. Borra los proxies (una confirmación) y comprueba que «Borrar todo» pide dos.
+6. `npm run build && npx vite preview --host 0.0.0.0`: instala la app, desconecta la red y recarga; el editor sigue funcionando.
 
 ## Fase 5 — keyframes visuales, stack de efectos, titulación avanzada y presets
 
@@ -385,8 +497,8 @@ Faithfulness details worth knowing:
 | 2 | Compositor, playback, editor shell, local storage | done (`web/tests`, history below) |
 | 3 | Interactive multitrack timeline with professional editing | done |
 | 4 | Advanced media pipeline: proxies, FFmpeg fallback, audio/vision, subtitles, relinking | done |
-| 5 | Visual keyframes, video/audio effect stacks, advanced titling, presets | **this document** |
-| 6 | Export pipeline (MP4/WebM, local) | |
+| 5 | Visual keyframes, video/audio effect stacks, advanced titling, presets | done |
+| 6 | Offline export MP4/WebM/GIF, installable PWA, project packages, storage manager | **done — this document** |
 
 ## License
 
