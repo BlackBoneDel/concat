@@ -15,8 +15,16 @@
 const BUILD_ID = '__CONCAT_BUILD_ID__';
 const PRECACHE_ASSETS = /*__CONCAT_PRECACHE__*/ [];
 const SHELL = ['./', './index.html', './offline.html', './manifest.json', './icons/icon-192.png', './icons/icon-512.png'];
-const CACHE = `concat-${BUILD_ID}`;
-const RUNTIME = `concat-runtime-${BUILD_ID}`;
+/*
+ * Fase 7+: explicit cache-schema version. Bumping it invalidates every
+ * cache of previous deploys on activate (the cleanup below deletes all
+ * `concat-*` caches that are not the two current ones), which is how the
+ * stale GitHub Pages shells of earlier fases get evicted. Keep in sync
+ * with SW_CACHE_VERSION in src/pwa/sw-register.ts.
+ */
+const CACHE_VERSION = 'v7';
+const CACHE = `concat-${CACHE_VERSION}-${BUILD_ID}`;
+const RUNTIME = `concat-runtime-${CACHE_VERSION}-${BUILD_ID}`;
 
 self.addEventListener('install', (event) => {
   event.waitUntil(
