@@ -1,0 +1,10 @@
+{
+  "$schema": "https://mintlify.com/docs.json",
+  "name": "Concat Web Video Editor",
+  "navigation": [
+    {
+      "group": "Overview",
+      "pages": ["README"]
+    }
+  ]
+}
