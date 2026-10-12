@@ -92,3 +92,8 @@ export {
   ProjectInspector,
   type ProjectInspectorOptions,
 } from './project-inspector.ts';
+export { chromaKeySection } from './chroma-key-section.ts';
+export { colorGradingSection } from './color-grading-section.ts';
+export { audioFxSection } from './audio-fx-section.ts';
+export { subtitlesSection } from './subtitles-section.ts';
+export { editEffects, type EffectSectionHost } from './effect-host.ts';

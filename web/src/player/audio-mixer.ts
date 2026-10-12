@@ -21,6 +21,8 @@ export interface ParamLike {
   value: number;
   setValueAtTime(value: number, time: number): void;
   linearRampToValueAtTime(value: number, time: number): void;
+  /** Fase 4 hook: curved fades (optional so older doubles keep working). */
+  setValueCurveAtTime?(values: Float32Array, startTime: number, duration: number): void;
 }
 
 /** A gain node. */
@@ -78,6 +80,42 @@ export interface ClipSourceSpec {
   rate: number;
 }
 
+/**
+ * Fase 4 hook: per-clip audio effects. The resolver may swap the buffer for
+ * a pre-rendered variant (pitch-preserving speed, transposition), supply a
+ * node chain spliced between the clip gain and the track gain, and shape
+ * the fades with curve tables.
+ */
+export interface AudioFxResolution {
+  /** Replacement buffer (already time-stretched / transposed). */
+  buffer?: BufferLike;
+  /** Multiplies `spec.rate` (e.g. 1/speed for a pre-stretched buffer). */
+  rateScale?: number;
+  /** Multiplies `spec.sourceOffset` (same reason). */
+  offsetScale?: number;
+  /** Effect chain: connect the clip gain to `input`, the chain to the track. */
+  chain?: { input: unknown; connect(destination: unknown): void; dispose(): void } | null;
+  /** Fade-in gain curve, 0→1 (scaled by the clip volume). */
+  fadeInCurve?: Float32Array | null;
+  /** Fade-out gain curve, 1→0 (scaled by the clip volume). */
+  fadeOutCurve?: Float32Array | null;
+}
+
+/** Fase 4 hook: resolves the effects of one clip at scheduling time. */
+export type AudioFxResolver = (key: string, spec: ClipSourceSpec, context: AudioGraphContext) => AudioFxResolution | null;
+
+// Fase 4 hook: process-wide resolver, so the player (which owns its mixer
+// privately) picks effects up without changes. Installed by `main.ts`.
+let defaultFxResolver: AudioFxResolver | null = null;
+
+/**
+ * Fase 4 hook: installs the resolver every mixer uses unless it has its own.
+ * @param resolver the resolver, or `null` to restore Fase 2 behaviour.
+ */
+export function setDefaultAudioFxResolver(resolver: AudioFxResolver | null): void {
+  defaultFxResolver = resolver;
+}
+
 /** A scheduled clip and its live nodes. */
 interface ScheduledSource {
   key: string;
@@ -85,6 +123,8 @@ interface ScheduledSource {
   spec: ClipSourceSpec;
   source: SourceLike | null;
   gain: GainLike | null;
+  /** Fase 4 hook: the effect chain disposer of the running source. */
+  disposeFx?: (() => void) | null;
 }
 
 /** Multitrack mixer over one audio context. */
@@ -96,6 +136,8 @@ export class AudioMixer {
   private readonly sources = new Map<string, ScheduledSource>();
   private readonly levelBuffer: Float32Array;
   private started = false;
+  // Fase 4 hook: per-clip effects resolver (null = Fase 2 behaviour).
+  private fxResolver: AudioFxResolver | null = null;
 
   /**
    * @param context the Web Audio context (or a test double).
@@ -108,6 +150,20 @@ export class AudioMixer {
     this.master.connect(this.analyser);
     this.analyser.connect(context.destination);
     this.levelBuffer = new Float32Array(this.analyser.fftSize);
+  }
+
+  /**
+   * Fase 4 hook: installs (or clears) the per-clip effects resolver. Takes
+   * effect for sources started afterwards.
+   * @param resolver the resolver, or `null`.
+   */
+  setAudioFxResolver(resolver: AudioFxResolver | null): void {
+    this.fxResolver = resolver;
+  }
+
+  /** The audio context the mixer schedules on (Fase 4: effect chains need it). */
+  get audioContext(): AudioGraphContext {
+    return this.context;
   }
 
   /**
@@ -259,32 +315,57 @@ export class AudioMixer {
     const { spec } = entry;
     const clipEnd = spec.timelineStart + spec.duration;
     if (timelineTime >= clipEnd) return;
+    // Fase 4 hook: effects may swap the buffer, rescale time, add a chain.
+    let fx: AudioFxResolution | null = null;
+    try {
+      fx = (this.fxResolver ?? defaultFxResolver)?.(entry.key, spec, this.context) ?? null;
+    } catch {
+      fx = null;
+    }
+    const rate = spec.rate * (fx?.rateScale ?? 1);
     const intoClip = Math.max(0, timelineTime - spec.timelineStart);
-    const startOffset = spec.sourceOffset + intoClip * spec.rate;
+    const startOffset = spec.sourceOffset * (fx?.offsetScale ?? 1) + intoClip * rate;
     const remaining = spec.duration - intoClip;
     // Clips still ahead on the timeline start later, on the same clock.
     const startAt = when + Math.max(0, spec.timelineStart - timelineTime);
     const source = this.context.createBufferSource();
     const gain = this.context.createGain();
-    source.buffer = spec.buffer;
-    source.playbackRate.value = Math.max(0.0625, Math.min(16, spec.rate));
+    source.buffer = fx?.buffer ?? spec.buffer;
+    source.playbackRate.value = Math.max(0.0625, Math.min(16, rate));
     source.connect(gain);
-    gain.connect(this.tracks.get(entry.trackId)?.gain ?? this.master);
+    const trackInput = this.tracks.get(entry.trackId)?.gain ?? this.master;
+    if (fx?.chain) {
+      gain.connect(fx.chain.input);
+      fx.chain.connect(trackInput);
+      entry.disposeFx = fx.chain.dispose;
+    } else {
+      gain.connect(trackInput);
+    }
 
     // The clip's gain ride: constant volume with its fade ramps.
     const level = Math.max(0, spec.volume);
     const endAt = startAt + remaining;
+    const param = gain.gain;
     if (spec.fadeIn > 0 && intoClip < spec.fadeIn) {
-      gain.gain.setValueAtTime(0, startAt);
-      gain.gain.linearRampToValueAtTime(level, startAt + (spec.fadeIn - intoClip));
+      const left = spec.fadeIn - intoClip;
+      if (fx?.fadeInCurve && param.setValueCurveAtTime && intoClip === 0) {
+        param.setValueCurveAtTime(fx.fadeInCurve.map((v) => v * level), startAt, left);
+      } else {
+        param.setValueAtTime(0, startAt);
+        param.linearRampToValueAtTime(level, startAt + left);
+      }
     } else {
-      gain.gain.setValueAtTime(level, startAt);
+      param.setValueAtTime(level, startAt);
     }
     if (spec.fadeOut > 0) {
       const fadeStart = endAt - spec.fadeOut;
       if (fadeStart > startAt) {
-        gain.gain.setValueAtTime(level, fadeStart);
-        gain.gain.linearRampToValueAtTime(0, endAt);
+        if (fx?.fadeOutCurve && param.setValueCurveAtTime) {
+          param.setValueCurveAtTime(fx.fadeOutCurve.map((v) => v * level), fadeStart, spec.fadeOut);
+        } else {
+          param.setValueAtTime(level, fadeStart);
+          param.linearRampToValueAtTime(0, endAt);
+        }
       }
     }
     source.start(startAt, startOffset, remaining > 0 ? remaining : undefined);
@@ -302,6 +383,8 @@ export class AudioMixer {
     }
     entry.source.disconnect();
     entry.gain?.disconnect();
+    entry.disposeFx?.(); // Fase 4 hook
+    entry.disposeFx = null;
     entry.source = null;
     entry.gain = null;
   }

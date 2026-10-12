@@ -20,6 +20,31 @@ import { FrameRate } from '../core/time.ts';
 import { Rational } from '../core/rational.ts';
 import { intrinsicSize, type RenderImage } from '../render/types.ts';
 import { MP4Demuxer, detectContainer, type ContainerKind, type DemuxTrack } from './demuxer.ts';
+import type { AudioBufferLike } from './audio/audio-buffer.ts';
+
+/**
+ * Fase 4: the slow path for files the browser cannot decode natively
+ * (MKV/AVI/FLV, HEVC in Chromium, …). Implemented by
+ * `media/ffmpeg/ffmpeg-fallback.ts`; kept structural so this module never
+ * imports the FFmpeg worker eagerly.
+ */
+export interface MediaFallback {
+  /** Probes streams/duration. */
+  probe(file: Blob): Promise<{
+    duration: Rational;
+    streams: { type: 'video' | 'audio' | 'subtitle'; codec: string; width?: number; height?: number; fps?: number; sampleRate?: number; channels?: number }[];
+  }>;
+  /** Re-encodes to something a `<video>` element plays (WebM VP8/Vorbis). */
+  conformForPreview(file: Blob, size: { width: number; height: number }): Promise<Blob>;
+  /** Decodes the audio track to planar float PCM. */
+  extractAudio(file: Blob): Promise<AudioBufferLike>;
+}
+
+/** Options for {@link MediaDecoder.constructor}. */
+export interface MediaDecoderOptions {
+  /** FFmpeg fallback used only when the native paths fail. */
+  fallback?: MediaFallback | null;
+}
 
 /** Everything a probe found out about a file. */
 export interface MediaInfo {
@@ -35,6 +60,8 @@ export interface MediaInfo {
   audioChannels: number;
   fileSize: number;
   container: ContainerKind;
+  /** Fase 4: true when the metadata (and playback) come from the FFmpeg fallback. */
+  viaFallback?: boolean;
 }
 
 /** How many frames the cache holds before the oldest are closed. */
@@ -65,14 +92,20 @@ export class MediaDecoder {
   private audioBuffer: AudioBuffer | null | undefined;
   private closed = false;
   private serial: Promise<unknown> = Promise.resolve();
+  private readonly fallback: MediaFallback | null;
+  /** The blob the fallback `<video>` element plays (the original or a conformed copy). */
+  private playable: Blob | null = null;
+  private conforming: Promise<Blob | null> | null = null;
 
   /**
    * @param file the local file.
    * @param id the asset id this decoder serves.
+   * @param options Fase 4: optional FFmpeg fallback.
    */
-  constructor(file: File | Blob, id: string) {
+  constructor(file: File | Blob, id: string, options: MediaDecoderOptions = {}) {
     this.file = file;
     this.id = id;
+    this.fallback = options.fallback ?? null;
   }
 
   /**
@@ -141,8 +174,30 @@ export class MediaDecoder {
       if (probe.height > 0) height = probe.height;
     }
 
+    // Fase 4 hook: nothing native could read the file → ask FFmpeg.
+    let viaFallback = false;
+    if (type !== 'image' && durationSeconds === 0 && width === 0 && this.fallback) {
+      try {
+        const probe = await this.fallback.probe(this.file);
+        const video = probe.streams.find((stream) => stream.type === 'video');
+        const audio = probe.streams.find((stream) => stream.type === 'audio');
+        durationSeconds = probe.duration.asNumber();
+        width = video?.width ?? 0;
+        height = video?.height ?? 0;
+        videoCodec = video?.codec ?? '';
+        audioCodec = audio?.codec ?? '';
+        sampleRate = audio?.sampleRate ?? 0;
+        channels = audio?.channels ?? 0;
+        if (video?.fps) fps = FrameRate.checked(Math.round(video.fps * 1000), 1000) ?? fps;
+        viaFallback = durationSeconds > 0 || width > 0;
+      } catch {
+        // FFmpeg unavailable or the file is unreadable: keep the empty probe.
+      }
+    }
+
     this.info = {
       id: this.id,
+      viaFallback,
       type: type === 'image' ? 'image' : this.videoTrack || width > 0 ? 'video' : 'audio',
       duration: Rational.approximate(durationSeconds) ?? Rational.ZERO,
       width,
@@ -270,6 +325,14 @@ export class MediaDecoder {
     } catch {
       this.audioBuffer = null;
     }
+    if (!this.audioBuffer && this.fallback && this.info?.audioCodec !== '') {
+      // Fase 4 hook: FFmpeg decodes the audio the browser could not.
+      try {
+        this.audioBuffer = toAudioBuffer(await this.fallback.extractAudio(this.file));
+      } catch {
+        this.audioBuffer = null;
+      }
+    }
     return this.audioBuffer;
   }
 
@@ -291,6 +354,7 @@ export class MediaDecoder {
       this.elementUrl = null;
     }
     this.audioBuffer = undefined;
+    this.playable = null;
   }
 
   // -- internals -----------------------------------------------------------
@@ -441,6 +505,11 @@ export class MediaDecoder {
 
   /** The hidden `<video>` element path. */
   private async getFrameFromElement(time: number): Promise<RenderImage | null> {
+    if (this.info?.viaFallback && !this.playable) {
+      // Fase 4 hook: conform once to WebM the element can play.
+      this.playable = await this.conformOnce();
+      if (!this.playable || this.closed) return null;
+    }
     const element = this.ensureElement();
     if (!element) return null;
     const clamped = Math.min(Math.max(0, time), Math.max(0, element.duration - 0.001));
@@ -457,10 +526,22 @@ export class MediaDecoder {
     video.muted = true;
     video.playsInline = true;
     video.preload = 'auto';
-    this.elementUrl = URL.createObjectURL(this.file);
+    this.elementUrl = URL.createObjectURL(this.playable ?? this.file);
     video.src = this.elementUrl;
     this.element = video;
     return video;
+  }
+
+  /** Runs the FFmpeg preview conform at most once. */
+  private conformOnce(): Promise<Blob | null> {
+    if (!this.conforming) {
+      const fallback = this.fallback;
+      const info = this.info;
+      this.conforming = fallback && info
+        ? fallback.conformForPreview(this.file, { width: info.width, height: info.height }).catch(() => null)
+        : Promise.resolve(null);
+    }
+    return this.conforming;
   }
 
   private async decodeStill(): Promise<RenderImage | null> {
@@ -493,6 +574,20 @@ export class MediaDecoder {
   private dropDecoder(): void {
     this.videoDecoder = null;
   }
+}
+
+/**
+ * Planar PCM → a real `AudioBuffer` (the mixer needs one).
+ * @param source decoded samples.
+ * @returns the buffer, or `null` where Web Audio is missing.
+ */
+function toAudioBuffer(source: AudioBufferLike): AudioBuffer | null {
+  if (typeof AudioBuffer === 'undefined' || source.length === 0) return null;
+  const buffer = new AudioBuffer({ length: source.length, numberOfChannels: source.numberOfChannels, sampleRate: source.sampleRate });
+  for (let channel = 0; channel < source.numberOfChannels; channel += 1) {
+    buffer.copyToChannel(Float32Array.from(source.getChannelData(channel)), channel);
+  }
+  return buffer;
 }
 
 /** Closes a frame when it is closeable (never a live element). */

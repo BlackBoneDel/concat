@@ -23,6 +23,13 @@ export {
   type CanvasBlend,
 } from './blend.ts';
 export { renderTextClip } from './text-renderer.ts';
+export {
+  VisionPipeline,
+  getVisionHook,
+  setVisionHook,
+  type VisionHook,
+  type VisionPipelineOptions,
+} from './vision-pipeline.ts';
 export type {
   FramePool,
   Point,

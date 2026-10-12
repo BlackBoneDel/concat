@@ -11,6 +11,9 @@ export {
 } from './timecode.ts';
 export {
   AudioMixer,
+  setDefaultAudioFxResolver,
+  type AudioFxResolution,
+  type AudioFxResolver,
   type AnalyserLike,
   type AudioGraphContext,
   type BufferLike,

@@ -19,6 +19,7 @@ import { applyBlend, resetBlend } from './blend.ts';
 import { renderTextClip } from './text-renderer.ts';
 import { applyTransform, fitRect } from './transform.ts';
 import { intrinsicSize } from './types.ts';
+import { getVisionHook } from './vision-pipeline.ts';
 import type { FramePool, RenderContext2D, RenderImage, RenderTarget } from './types.ts';
 
 /** Options for {@link renderFrame}. */
@@ -129,6 +130,8 @@ async function drawClip(
   const intrinsic = intrinsicSize(source);
   const sourceWidth = size?.width ?? intrinsic.width;
   const sourceHeight = size?.height ?? intrinsic.height;
+  // Fase 4 hook: picture effects (keys, grade, LUT) before blend/transform.
+  const picture = getVisionHook()?.process(clip, source, sourceWidth, sourceHeight) ?? source;
 
   // Crop takes fractions off each edge *before* fitting: the picture that is
   // fitted and placed is the cropped source.
@@ -144,7 +147,7 @@ async function drawClip(
 
   applyBlend(ctx, clip.blend, opacity);
   applyTransform(ctx, transform, sw, sh, frameWidth, frameHeight);
-  drawSource(ctx, source, sx, sy, sw, sh, frameWidth, frameHeight);
+  drawSource(ctx, picture, sx, sy, sw, sh, frameWidth, frameHeight);
   ctx.restore();
   resetBlend(ctx);
 }

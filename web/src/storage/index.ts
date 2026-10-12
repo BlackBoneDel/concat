@@ -29,3 +29,15 @@ export {
   type SettingsStorage,
   type UserSettings,
 } from './settings-store.ts';
+export {
+  MemoryProxyFiles,
+  OpfsProxyFiles,
+  PROXY_DB_NAME,
+  PROXY_DIR,
+  PROXY_STORE_NAME,
+  ProxyRecordStore,
+  isProxyRecord,
+  openProxyStorage,
+  type ProxyFileBackend,
+  type ProxyRecord,
+} from './proxy-store.ts';

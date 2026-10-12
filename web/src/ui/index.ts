@@ -13,3 +13,9 @@ export { Modal, type ModalButtons } from './modal.ts';
 export { ThemeManager, THEMES, type ThemeName, type ThemePalette } from './theme-manager.ts';
 export { KeyboardShortcuts, DEFAULT_SHORTCUTS, type ShortcutCombo, type ShortcutHandler } from './shortcuts.ts';
 export type { AppContext } from './app-context.ts';
+// Fase 4: media tools registry, dialogs and inspector sections.
+export { getMediaTools, setMediaTools, type MediaTools, type ProxyState } from './media-tools.ts';
+export { showContextMenu, showMetadataDialog, type MenuItem } from './media-context-menu.ts';
+export { PROXY_TOGGLE_SHORTCUT } from './header-bar.ts';
+export * from './modals/index.ts';
+export { audioFxSection, chromaKeySection, colorGradingSection, subtitlesSection, editEffects, type EffectSectionHost } from './inspector/index.ts';

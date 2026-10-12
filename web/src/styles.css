@@ -1348,3 +1348,309 @@ body {
 .marker-editor .field-row {
   margin-bottom: 10px;
 }
+
+/* -- Fase 4: effect sections ---------------------------------------------- */
+.fx-group > summary.inspector-group-title {
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.fx-group > summary.inspector-group-title::before {
+  content: '▸';
+  display: inline-block;
+  width: 1em;
+  color: var(--text-muted);
+  transition: transform 0.12s ease;
+}
+.fx-group[open] > summary.inspector-group-title::before {
+  transform: rotate(90deg);
+}
+.fx-group > summary:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}
+.fx-subheading {
+  margin: 10px 0 4px;
+  font-size: 11px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+.fx-slider input[type='range'] {
+  flex: 1;
+  min-width: 0;
+  accent-color: var(--accent);
+}
+.fx-readout {
+  min-width: 52px;
+  text-align: right;
+  font-family: var(--mono);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.fx-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 6px 0;
+}
+.fx-note {
+  margin: 4px 0;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.fx-textarea {
+  width: 100%;
+  min-height: 64px;
+  resize: vertical;
+  font-family: var(--font);
+}
+.input-color {
+  width: 36px;
+  height: 24px;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-input);
+  cursor: pointer;
+}
+.field-row.field-column {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 4px;
+}
+
+/* -- Fase 4: dialogs -------------------------------------------------------- */
+.f4-modal {
+  width: min(720px, 94vw);
+  max-height: 86vh;
+  display: flex;
+  flex-direction: column;
+}
+.f4-modal .modal-body {
+  overflow: auto;
+  flex: 1;
+}
+.f4-modal:focus {
+  outline: none;
+}
+.f4-progress {
+  height: 6px;
+  margin: 6px 0;
+  border-radius: 3px;
+  background: var(--bg-input);
+  overflow: hidden;
+}
+.f4-progress-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.2s linear;
+}
+.lut-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+  gap: 8px;
+  padding: 4px;
+}
+.lut-grid:focus-visible {
+  outline: 2px solid var(--accent);
+}
+.lut-option {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  cursor: pointer;
+}
+.lut-option.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+.lut-swatch {
+  height: 40px;
+  border-radius: 4px;
+  background-size: cover;
+  background-color: var(--bg-input);
+}
+.lut-name {
+  font-size: 12px;
+  color: var(--text);
+}
+.lut-meta {
+  font-size: 10px;
+  color: var(--text-muted);
+}
+.relink-list,
+.proxy-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.relink-row,
+.proxy-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 4px 8px;
+  align-items: center;
+  padding: 6px 8px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+}
+.relink-row {
+  grid-template-columns: 1fr minmax(160px, 1.4fr) auto auto;
+}
+.relink-meta {
+  grid-column: 1;
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.relink-badge {
+  font-size: 11px;
+  color: var(--warning);
+}
+.relink-badge.auto {
+  color: var(--success);
+}
+.proxy-row {
+  grid-template-columns: 1fr auto auto auto;
+}
+.proxy-row .f4-progress {
+  grid-column: 1 / -1;
+}
+.proxy-name {
+  font-size: 12px;
+  grid-column: 1 / -1;
+}
+.proxy-status {
+  font-size: 11px;
+  color: var(--text-muted);
+}
+.proxy-row.status-ready .proxy-status {
+  color: var(--success);
+}
+.proxy-row.status-error .proxy-status {
+  color: var(--danger);
+}
+.bulk-form {
+  display: grid;
+  gap: 4px;
+}
+.bulk-log {
+  max-height: 180px;
+  overflow: auto;
+  margin: 6px 0 0;
+  padding: 0;
+  list-style: none;
+  font-family: var(--mono);
+  font-size: 11px;
+}
+.bulk-log-ok {
+  color: var(--success);
+}
+.bulk-log-error {
+  color: var(--danger);
+}
+
+/* -- Fase 4: media panel states ------------------------------------------- */
+.media-badge {
+  position: absolute;
+  top: 4px;
+  right: 4px;
+  min-width: 16px;
+  padding: 0 4px;
+  border-radius: 3px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  background: var(--bg-elevated);
+  color: var(--text-muted);
+  border: 1px solid var(--border);
+}
+.media-badge.proxy-ready {
+  background: var(--success);
+  color: var(--accent-text);
+  border-color: transparent;
+}
+.media-badge.proxy-generating,
+.media-badge.proxy-pending {
+  color: var(--accent);
+  border-color: var(--accent);
+}
+.media-badge.proxy-error {
+  color: var(--danger);
+  border-color: var(--danger);
+}
+.media-card.offline {
+  opacity: 0.6;
+  outline: 1px dashed var(--warning);
+}
+.media-card .media-offline {
+  font-size: 10px;
+  color: var(--warning);
+}
+.media-proxy-progress {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  height: 3px;
+  background: var(--accent);
+}
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg-elevated);
+  box-shadow: 0 6px 18px var(--shadow);
+}
+.context-menu button {
+  display: block;
+  width: 100%;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+.context-menu button:hover,
+.context-menu button:focus-visible {
+  background: var(--accent);
+  color: var(--accent-text);
+  outline: none;
+}
+.context-menu button:disabled {
+  color: var(--text-muted);
+  background: transparent;
+  cursor: default;
+}
+.header-toggle[aria-pressed='true'] {
+  background: var(--accent);
+  color: var(--accent-text);
+}
+.metadata-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 4px 12px;
+  margin: 0;
+  font-size: 12px;
+}
+.metadata-list dt {
+  color: var(--text-muted);
+}
+.metadata-list dd {
+  margin: 0;
+  font-family: var(--mono);
+  word-break: break-all;
+}

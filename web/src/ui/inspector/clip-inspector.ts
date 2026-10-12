@@ -28,6 +28,11 @@ import {
   type TransitionKind,
 } from '../../editor/operations.ts';
 import { KeyEase, type KeyProperty } from '../../model/wire.ts';
+import type { DocumentClip } from '../../model/document.ts';
+import { audioFxSection } from './audio-fx-section.ts';
+import { chromaKeySection } from './chroma-key-section.ts';
+import { colorGradingSection } from './color-grading-section.ts';
+import { subtitlesSection } from './subtitles-section.ts';
 
 /** What the inspector needs from its host. */
 export interface InspectorOptions {
@@ -44,6 +49,8 @@ export class ClipInspector {
   readonly element: HTMLElement;
   private readonly options: InspectorOptions;
   private clipId = '';
+  /** Fase 4: which effect groups the user left open (survives re-renders). */
+  private readonly openGroups = new Map<string, boolean>();
 
   /**
    * @param options host wiring.
@@ -61,6 +68,7 @@ export class ClipInspector {
    * @param clipId the clip.
    */
   show(clipId: string): void {
+    this.rememberOpenGroups();
     this.clipId = clipId;
     const doc = this.options.getDocument();
     const clip = currentTimeline(doc).clips.find((candidate) => candidate.id === clipId);
@@ -128,6 +136,32 @@ export class ClipInspector {
 
     this.buildTransitionSection(clip.transitionIn ? { ...clip.transitionIn } : null);
     this.buildKeyframeSection(clip.keys);
+    // Fase 4: keying, colour/LUT, audio effects and subtitle text.
+    this.buildMediaSections(clip);
+  }
+
+  /** Fase 4 sections, by clip kind (effects live in `clip.extra.effects`). */
+  private buildMediaSections(clip: DocumentClip): void {
+    const host = { getDocument: () => this.options.getDocument(), run: (op: EditOperation) => this.options.run(op) };
+    const sections: (HTMLElement | null)[] = [];
+    if (clip.kind === 'video' || clip.kind === 'image') sections.push(chromaKeySection(host, clip), colorGradingSection(host, clip));
+    if (clip.kind === 'video' || clip.kind === 'audio') sections.push(audioFxSection(host, clip));
+    sections.push(subtitlesSection(host, clip));
+    for (const section of sections) {
+      if (!section) continue;
+      const key = [...section.classList].find((name) => name.startsWith('fx-') && name !== 'fx-group');
+      const open = key ? this.openGroups.get(key) : undefined;
+      if (open !== undefined && section instanceof HTMLDetailsElement) section.open = open;
+      this.element.appendChild(section);
+    }
+  }
+
+  /** Records the open state of the effect groups before a rebuild. */
+  private rememberOpenGroups(): void {
+    for (const details of this.element.querySelectorAll('details.fx-group')) {
+      const key = [...details.classList].find((name) => name.startsWith('fx-') && name !== 'fx-group');
+      if (key && details instanceof HTMLDetailsElement) this.openGroups.set(key, details.open);
+    }
   }
 
   /** Groups a set of fields under a heading. */

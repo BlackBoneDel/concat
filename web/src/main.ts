@@ -6,6 +6,11 @@
  * together, and owns the app-level flows (import, save/open, autosave,
  * shortcuts). Everything runs against local storage — no network, no
  * telemetry.
+ *
+ * Fase 4 wiring: FFmpeg fallback for the pool, proxies, audio effects
+ * resolver (+ gate worklet), vision pipeline (keying, grading, LUTs),
+ * bulk import with fingerprints, relinking and subtitles — all through the
+ * {@link MediaToolkit} registered as the UI's media tools.
  */
 
 import { Rational } from './core/rational.ts';
@@ -22,6 +27,16 @@ import { MediaStore } from './storage/media-store.ts';
 import { ProjectStore } from './storage/project-store.ts';
 import { MemoryKeyValue, openKeyValue } from './storage/idb.ts';
 import { loadSettings, saveSettings as persistSettings, type UserSettings } from './storage/settings-store.ts';
+import { FFmpegFallback } from './media/ffmpeg/ffmpeg-fallback.ts';
+import { BulkImporter } from './media/import/bulk-importer.ts';
+import { AudioProcessor } from './media/audio/audio-processor.ts';
+import { ensureGateWorklet } from './media/audio/noise-gate.ts';
+import { setDefaultAudioFxResolver } from './player/audio-mixer.ts';
+import { VisionPipeline, setVisionHook } from './render/vision-pipeline.ts';
+import { MediaToolkit } from './app/media-toolkit.ts';
+import { EffectsCache, createAudioFxResolver, createVisionResolver } from './app/effect-resolvers.ts';
+import { setMediaTools } from './ui/media-tools.ts';
+import { PROXY_TOGGLE_SHORTCUT } from './ui/header-bar.ts';
 import {
   HeaderBar,
   InspectorPanel,
@@ -55,14 +70,28 @@ class CanvasRef implements RenderTarget {
   getContext(type: '2d'): RenderContext2D | null {
     return this.canvas?.getContext(type) ?? null;
   }
+
+  /** Fase 4: the real canvas (eyedropper). */
+  get element(): HTMLCanvasElement | null {
+    return this.canvas;
+  }
 }
+
+/** Subtitle files routed to the subtitle importer. */
+const SUBTITLE_FILE = /\.(srt|vtt)$/i;
 
 /** The editor application. */
 class EditorApp implements AppContext {
   session = new EditSession();
   editSession: EditSession = this.session;
   player: PreviewPlayer;
-  pool = new MediaPool();
+  /** Fase 4: lazy FFmpeg (never loaded unless WebCodecs fails). */
+  readonly ffmpeg = new FFmpegFallback();
+  pool = new MediaPool({ fallback: this.ffmpeg });
+  /** Fase 4: proxies, LUTs, relink, subtitles, bulk import. */
+  readonly media: MediaToolkit;
+  private readonly effectsCache = new EffectsCache();
+  private audioProcessor: AudioProcessor | null = null;
   mediaStore: MediaStore;
   projectStore: ProjectStore;
   history = new History();
@@ -92,6 +121,7 @@ class EditorApp implements AppContext {
       mediaPool: this.pool,
       audioContext: null,
     });
+    this.media = new MediaToolkit(this, { transcoder: this.ffmpeg });
   }
 
   /** Boots the shell and the services. */
@@ -139,6 +169,11 @@ class EditorApp implements AppContext {
     this.timelinePanel = new TimelinePanel(layout.timelinePanel, this);
     this.inspectorPanel = new InspectorPanel(layout.inspectorPanel, this);
 
+    // Fase 4: media tools, effect hooks.
+    setMediaTools(this.media);
+    this.header.syncProxyToggle();
+    this.installEffectHooks(audioContext);
+
     // Shortcuts.
     this.wireShortcuts();
     this.shortcuts.setEnabled(true);
@@ -168,6 +203,8 @@ class EditorApp implements AppContext {
 
     // Restore the media library from OPFS.
     await this.restoreMediaLibrary();
+    // Fase 4: proxies (orphan cleanup + re-attach) and offline detection.
+    void this.media.init();
 
     // OPFS status line.
     if (!(await this.mediaStore.hasOpfs())) {
@@ -184,24 +221,51 @@ class EditorApp implements AppContext {
   // -- AppContext ----------------------------------------------------------
 
   async importFiles(files: File[]): Promise<void> {
-    for (const file of files) {
-      const id = crypto.randomUUID();
-      try {
-        const asset = await this.pool.addMedia(file, id, file.name);
-        const decoder = this.pool.getDecoder(id);
-        const info = decoder?.mediaInfo;
-        if (info) {
-          await this.mediaStore.importFile(file, info, id, file.name);
-        }
-        this.session.addMediaItem(this.toMediaItem(asset.id, asset.name, asset));
-        void this.generateWaveforms(file, asset.id);
-        this.notifications.success('Medio importado', asset.name);
-      } catch (error) {
-        this.notifications.error('Error al importar', `${file.name}: ${describe(error)}`);
+    // Fase 4: subtitles go to their own importer; media through the
+    // BulkImporter (2 in parallel, per-file errors never stop the batch).
+    for (const file of files.filter((f) => SUBTITLE_FILE.test(f.name))) await this.media.importSubtitles(file);
+    const media = files.filter((f) => !SUBTITLE_FILE.test(f.name));
+    if (media.length > 0) {
+      const importer = new BulkImporter<MediaItem>((source) => this.importOne(source.file), { concurrency: 2, acceptUnknown: true });
+      for await (const event of importer.run(media)) {
+        if (event.type === 'complete') this.notifications.success('Medio importado', event.result.name);
+        else if (event.type === 'error') this.notifications.error('Error al importar', `${event.name}: ${event.error}`);
       }
     }
     document.dispatchEvent(new CustomEvent('media-library-changed'));
     this.requestAutosave();
+  }
+
+  /**
+   * Imports one file: pool, OPFS, bin item, waveforms, fingerprint and the
+   * automatic proxy policy (Fase 4).
+   * @param file the local file.
+   * @returns the new bin item.
+   */
+  async importOne(file: File): Promise<MediaItem> {
+    const id = crypto.randomUUID();
+    const asset = await this.pool.addMedia(file, id, file.name);
+    const info = this.pool.getDecoder(id)?.mediaInfo;
+    if (info) await this.mediaStore.importFile(file, info, id, file.name);
+    const item = this.toMediaItem(asset.id, asset.name, asset);
+    this.session.addMediaItem(item);
+    void this.generateWaveforms(file, asset.id);
+    void this.media.fingerprint(id, file);
+    if (info) this.media.autoProxy(id, info);
+    return item;
+  }
+
+  /** Fase 4 {@link ToolkitHost}: the preview canvas. */
+  previewCanvas(): HTMLCanvasElement | null {
+    return this.canvasRef.element;
+  }
+
+  /** Fase 4 {@link ToolkitHost}: refresh after a toolkit edit. */
+  afterEdit(): void {
+    this.refreshAll();
+    this.requestRender();
+    this.requestAutosave();
+    document.dispatchEvent(new CustomEvent('timeline-changed'));
   }
 
   async saveProject(): Promise<void> {
@@ -232,6 +296,7 @@ class EditorApp implements AppContext {
     this.selectedClipId = null;
     this.refreshAll();
     this.requestRender();
+    void this.media.refreshOffline();
     this.notifications.success('Proyecto abierto', loaded.name);
   }
 
@@ -297,8 +362,42 @@ class EditorApp implements AppContext {
 
   // -- internals -----------------------------------------------------------
 
+  /**
+   * Fase 4: audio effects resolver (+ noise-gate worklet) and the vision
+   * pipeline, both reading `clip.extra.effects`.
+   */
+  private installEffectHooks(audioContext: AudioContext | null): void {
+    const reschedule = (): void => {
+      if (this.player.isPlaying) this.player.seekTo(this.player.currentTime);
+      else this.requestRender();
+    };
+    const processor = new AudioProcessor();
+    processor.onVariantReady = reschedule;
+    this.audioProcessor = processor;
+    setDefaultAudioFxResolver(createAudioFxResolver({
+      processor,
+      getDocument: () => this.session.document,
+      cache: this.effectsCache,
+      onMeasured: reschedule,
+      onError: (error) => console.warn('Medición de sonoridad fallida', error),
+    }));
+    if (audioContext) {
+      void ensureGateWorklet(audioContext).catch((error: unknown) => console.warn('Puerta de ruido sin AudioWorklet', error));
+    }
+    setVisionHook(new VisionPipeline(createVisionResolver(() => this.session.document, this.effectsCache), {
+      resolveLut: (id) => this.media.luts.get(id),
+      onError: (error) => this.media.notify('error', 'Efecto de vídeo', error.message),
+    }));
+    this.media.luts.onChange(() => this.requestRender());
+  }
+
   private wireShortcuts(): void {
     const ctx = this;
+    // Fase 4: proxy playback toggle.
+    this.shortcuts.bind(PROXY_TOGGLE_SHORTCUT, () => {
+      ctx.media.toggleProxies();
+      ctx.header?.syncProxyToggle();
+    });
     this.shortcuts.bindAction('play', () => {
       if (ctx.player.isPlaying) ctx.player.pause();
       else ctx.player.play();

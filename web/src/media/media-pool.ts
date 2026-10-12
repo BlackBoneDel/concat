@@ -12,7 +12,7 @@
 
 import { Rational } from '../core/rational.ts';
 import type { FramePool, RenderImage } from '../render/types.ts';
-import { MediaDecoder, type MediaInfo } from './decoder.ts';
+import { MediaDecoder, type MediaFallback, type MediaInfo } from './decoder.ts';
 import { generateThumbnail, thumbnailKey, MemoryThumbnailStore, type ThumbnailStore } from './thumbnail.ts';
 
 /** A loaded asset: what the library shows and the timeline references. */
@@ -39,6 +39,15 @@ export interface MediaPoolOptions {
   thumbnailStore?: ThumbnailStore;
   /** Seconds of frames to warm ahead of the playhead. */
   preloadSeconds?: number;
+  /** Fase 4: FFmpeg fallback handed to every decoder (lazy; never loaded unless needed). */
+  fallback?: MediaFallback | null;
+}
+
+/** Fase 4: a proxy attached to an asset. */
+interface AttachedProxy {
+  decoder: MediaDecoder;
+  width: number;
+  height: number;
 }
 
 /** Thumbs shown in the library grid. */
@@ -51,10 +60,14 @@ export class MediaPool implements FramePool {
   private readonly decoders = new Map<string, MediaDecoder>();
   private readonly thumbnailStore: ThumbnailStore;
   private readonly preloadSeconds: number;
+  private readonly fallback: MediaFallback | null;
+  private readonly proxies = new Map<string, AttachedProxy>();
+  private useProxies = true;
 
   constructor(options: MediaPoolOptions = {}) {
     this.thumbnailStore = options.thumbnailStore ?? new MemoryThumbnailStore();
     this.preloadSeconds = options.preloadSeconds ?? 2;
+    this.fallback = options.fallback ?? null;
   }
 
   /**
@@ -65,7 +78,7 @@ export class MediaPool implements FramePool {
    * @returns the loaded asset.
    */
   async addMedia(file: File | Blob, id: string, name = file instanceof File ? file.name : id): Promise<MediaAsset> {
-    const decoder = new MediaDecoder(file, id);
+    const decoder = new MediaDecoder(file, id, { fallback: this.fallback });
     const info: MediaInfo = await decoder.init();
     this.decoders.set(id, decoder);
 
@@ -117,9 +130,110 @@ export class MediaPool implements FramePool {
    * @returns a drawable frame, or `null`.
    */
   async getFrame(id: string, sourceTime: Rational): Promise<RenderImage | null> {
+    const proxy = this.activeProxy(id);
+    if (proxy) {
+      const frame = await proxy.decoder.getFrame(sourceTime);
+      if (frame) return frame;
+    }
     const decoder = this.decoders.get(id);
     if (!decoder) return null;
     return decoder.getFrame(sourceTime);
+  }
+
+  /**
+   * Fase 4: the full-quality frame, ignoring proxies — what export renders.
+   * @param id the asset id.
+   * @param sourceTime seconds into the media.
+   * @returns a drawable frame, or `null`.
+   */
+  async getOriginalFrame(id: string, sourceTime: Rational): Promise<RenderImage | null> {
+    const decoder = this.decoders.get(id);
+    return decoder ? decoder.getFrame(sourceTime) : null;
+  }
+
+  /**
+   * Fase 4: a {@link FramePool} view that always reads originals — what the
+   * export renderer must use so proxies never reach the output file.
+   * @returns the original-quality pool view.
+   */
+  originalFrames(): FramePool {
+    return {
+      getFrame: (id, sourceTime) => this.getOriginalFrame(id, sourceTime),
+      getSize: (id) => {
+        const asset = this.assets.get(id);
+        return asset && asset.width > 0 ? { width: asset.width, height: asset.height } : null;
+      },
+    };
+  }
+
+  /**
+   * Fase 4: plays `proxy` instead of the original while proxies are on.
+   * Replaces (and closes) any proxy already attached.
+   * @param id the asset id.
+   * @param proxy the proxy file (OPFS blob).
+   * @param size the proxy's pixel size.
+   * @returns false when the asset is unknown.
+   */
+  attachProxy(id: string, proxy: Blob, size: { width: number; height: number }): boolean {
+    if (!this.assets.has(id)) return false;
+    this.detachProxy(id);
+    this.proxies.set(id, { decoder: new MediaDecoder(proxy, `${id}:proxy`), width: size.width, height: size.height });
+    return true;
+  }
+
+  /** Fase 4: drops the proxy of an asset (closing its decoder). */
+  detachProxy(id: string): void {
+    this.proxies.get(id)?.decoder.close();
+    this.proxies.delete(id);
+  }
+
+  /** Fase 4: whether an asset has a proxy attached. */
+  hasProxy(id: string): boolean {
+    return this.proxies.has(id);
+  }
+
+  /** Fase 4: whether preview uses proxies. */
+  get proxiesEnabled(): boolean {
+    return this.useProxies;
+  }
+
+  /** Fase 4: switches preview between proxies and originals. */
+  setUseProxies(on: boolean): void {
+    this.useProxies = on;
+  }
+
+  /**
+   * Fase 4: swaps an asset's source file (relink), keeping its id so every
+   * clip referencing it keeps its edits.
+   * @param id the asset id.
+   * @param file the new local file.
+   * @returns the refreshed asset, or `null` when the id is unknown.
+   */
+  async replaceSource(id: string, file: File | Blob): Promise<MediaAsset | null> {
+    const asset = this.assets.get(id);
+    if (!asset) return null;
+    const decoder = new MediaDecoder(file, id, { fallback: this.fallback });
+    const info = await decoder.init();
+    this.decoders.get(id)?.close();
+    this.decoders.set(id, decoder);
+    const next: MediaAsset = {
+      ...asset,
+      name: file instanceof File ? file.name : asset.name,
+      duration: info.duration,
+      width: info.width,
+      height: info.height,
+      fps: info.fps,
+      codec: info.videoCodec || info.audioCodec,
+      fileSize: info.fileSize,
+      file,
+    };
+    this.assets.set(id, next);
+    return next;
+  }
+
+  /** The proxy serving `id` right now, if any. */
+  private activeProxy(id: string): AttachedProxy | null {
+    return this.useProxies ? this.proxies.get(id) ?? null : null;
   }
 
   /** The whole audio track of an asset. */
@@ -131,6 +245,9 @@ export class MediaPool implements FramePool {
 
   /** Intrinsic pixel size of the media, for aspect-fitting. */
   getSize(id: string): { width: number; height: number } | null {
+    // Fase 4: the compositor crops in source pixels, so report the proxy's.
+    const proxy = this.activeProxy(id);
+    if (proxy) return { width: proxy.width, height: proxy.height };
     const asset = this.assets.get(id);
     return asset && asset.width > 0 ? { width: asset.width, height: asset.height } : null;
   }
@@ -151,7 +268,7 @@ export class MediaPool implements FramePool {
    */
   async preload(requests: { id: string; time: Rational }[]): Promise<void> {
     for (const { id, time } of requests) {
-      const decoder = this.decoders.get(id);
+      const decoder = this.activeProxy(id)?.decoder ?? this.decoders.get(id);
       if (!decoder) continue;
       void decoder.getFrame(time);
       void decoder.getFrame(time.add(Rational.approximate(this.preloadSeconds / 2) ?? Rational.ZERO));
@@ -165,6 +282,7 @@ export class MediaPool implements FramePool {
     if (asset.thumbnailUrl !== '') URL.revokeObjectURL(asset.thumbnailUrl);
     this.decoders.get(id)?.close();
     this.decoders.delete(id);
+    this.detachProxy(id);
     this.assets.delete(id);
   }
 

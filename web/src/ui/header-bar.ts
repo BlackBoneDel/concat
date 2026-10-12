@@ -5,6 +5,9 @@
  * The header bar: brand, menus, project identity, save state, undo/redo,
  * theme toggle and the settings/shortcuts modals. Menus are modal pickers —
  * keyboard reachable, no hover-only chrome.
+ *
+ * Fase 4: proxy toggle (Ctrl+Shift+P) and File-menu entries for folder,
+ * subtitle and LUT import, subtitle export, proxies and relinking.
  */
 
 import { DEFAULT_SHORTCUTS } from './shortcuts.ts';
@@ -12,6 +15,10 @@ import { THEMES, type ThemeName } from './theme-manager.ts';
 import { Modal } from './modal.ts';
 import type { AppContext } from './app-context.ts';
 import markUrl from '../assets/concat-mark.png';
+import { getMediaTools } from './media-tools.ts';
+
+/** Fase 4 shortcut of the proxy toggle (bound in main.ts). */
+export const PROXY_TOGGLE_SHORTCUT = 'Ctrl+Shift+P';
 
 /** Human-readable byte count for the project list. */
 function formatBytes(bytes: number): string {
@@ -26,6 +33,7 @@ export class HeaderBar {
   private readonly ctx: AppContext;
   private readonly saveState: HTMLElement;
   private readonly projectName: HTMLElement;
+  private readonly proxyToggle: HTMLButtonElement;
 
   /**
    * @param root the header element.
@@ -79,6 +87,18 @@ export class HeaderBar {
     actions.appendChild(undo);
     actions.appendChild(redo);
     actions.appendChild(this.actionButton('💾', 'Guardar (Ctrl+S)', () => void this.ctx.saveProject()));
+    // Fase 4: proxy playback toggle.
+    this.proxyToggle = document.createElement('button');
+    this.proxyToggle.type = 'button';
+    this.proxyToggle.className = 'btn btn-ghost btn-small header-toggle';
+    this.proxyToggle.textContent = 'Proxy';
+    this.proxyToggle.title = `Previsualizar con proxies (${PROXY_TOGGLE_SHORTCUT})`;
+    this.proxyToggle.setAttribute('aria-pressed', 'false');
+    this.proxyToggle.addEventListener('click', () => {
+      getMediaTools()?.toggleProxies();
+      this.syncProxyToggle();
+    });
+    actions.appendChild(this.proxyToggle);
     actions.appendChild(
       this.actionButton('◐', 'Cambiar tema', () => {
         const order: ThemeName[] = ['dark', 'light', 'cyberpunk'];
@@ -92,7 +112,16 @@ export class HeaderBar {
     this.root.appendChild(actions);
 
     document.addEventListener('project-changed', () => this.sync());
+    document.addEventListener('media-proxy-changed', () => this.syncProxyToggle());
     this.sync();
+    this.syncProxyToggle();
+  }
+
+  /** Fase 4: reflects the proxy toggle state. */
+  syncProxyToggle(): void {
+    const tools = getMediaTools();
+    this.proxyToggle.disabled = tools === null;
+    this.proxyToggle.setAttribute('aria-pressed', String(tools?.proxiesEnabled ?? false));
   }
 
   /** Reflects name and dirty state. */
@@ -137,6 +166,17 @@ export class HeaderBar {
     list.appendChild(this.menuItem('Abrir proyecto…', 'Ctrl+O', () => this.openProjectModal()));
     list.appendChild(this.menuItem('Guardar', 'Ctrl+S', () => void this.ctx.saveProject()));
     list.appendChild(this.menuItem('Importar medios…', 'Ctrl+I', () => document.dispatchEvent(new CustomEvent('open-import'))));
+    // Fase 4 entries.
+    const tools = getMediaTools();
+    if (tools) {
+      list.appendChild(this.menuItem('Importar carpeta…', '', () => tools.importFolder()));
+      list.appendChild(this.menuItem('Importar subtítulos…', '.srt / .vtt', () => this.pickFile('.srt,.vtt', (file) => void tools.importSubtitles(file))));
+      list.appendChild(this.menuItem('Exportar subtítulos SRT', '', () => tools.exportSubtitles('srt')));
+      list.appendChild(this.menuItem('Exportar subtítulos VTT', '', () => tools.exportSubtitles('vtt')));
+      list.appendChild(this.menuItem('Cargar LUT…', '.cube', () => this.pickFile('.cube', (file) => void tools.importLut(file))));
+      list.appendChild(this.menuItem('Gestor de proxies…', PROXY_TOGGLE_SHORTCUT + ' alterna', () => tools.openProxyManager()));
+      list.appendChild(this.menuItem('Medios sin conexión…', '', () => tools.openRelink()));
+    }
     this.openMenu = new Modal('Archivo', list);
   }
 
@@ -160,6 +200,18 @@ export class HeaderBar {
       }),
     );
     this.openMenu = new Modal('Edición', list);
+  }
+
+  /** Opens a one-file picker (Fase 4). */
+  private pickFile(accept: string, onFile: (file: File) => void): void {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) onFile(file);
+    });
+    input.click();
   }
 
   private menuItem(label: string, combo: string, onClick: () => void): HTMLElement {
@@ -321,6 +373,16 @@ export class HeaderBar {
       row.appendChild(shortcut);
       list.appendChild(row);
     }
+    // Fase 4: the proxy toggle.
+    const proxyRow = document.createElement('div');
+    proxyRow.className = 'menu-item';
+    const proxyText = document.createElement('span');
+    proxyText.textContent = 'toggleProxies';
+    const proxyCombo = document.createElement('span');
+    proxyCombo.className = 'menu-combo';
+    proxyCombo.textContent = PROXY_TOGGLE_SHORTCUT;
+    proxyRow.append(proxyText, proxyCombo);
+    list.appendChild(proxyRow);
     new Modal('Atajos de teclado', list);
   }
 

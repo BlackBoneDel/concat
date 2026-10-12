@@ -1,4 +1,4 @@
-# Concat Web — Fase 3: timeline interactivo multitrack con edición profesional
+# Concat Web — Fase 4: pipeline de medios avanzado
 
 Port of [`jub0t/Concat`](https://github.com/jub0t/Concat) (the open-source,
 cross-platform video editor) to a **100% local web application**. No servers,
@@ -56,6 +56,76 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 9. **Rhythm** — autosave every 30s + restore on reopen, undo per gesture,
    real-time canvas preview, all colors from theme variables, full keyboard
    shortcuts that never fire while typing.
+
+## Fase 4 — pipeline de medios avanzado
+
+El equivalente web de `concat-media` / `concat-speech` / `concat-effects`
+(`src/crates/*`). Todo corre en el navegador: FFmpeg.wasm se sirve desde
+`/vendor/ffmpeg/` (mismo origen, sin CDN) y solo se carga si WebCodecs falla.
+
+| Área | Módulos | Notas |
+|---|---|---|
+| Proxies | `media/proxy/*`, `storage/proxy-store.ts`, `workers/proxy-worker.ts` | Auto si ≥1920×1080, >8 Mbps o HEVC/AV1/ProRes. 1280×720@30 2 Mbps H.264 (bajo: 640×360@24 800 Kbps), aspecto exacto. Cola con prioridades (2 en paralelo, 1–4), cancelar/reordenar, 1 reintento. OPFS `/proxies/{id}.mp4` + IDB `ConcatProxyDB.proxies`, SHA-256, LRU de 5 GB, limpieza de huérfanos. Botón **Proxy** / `Ctrl+Shift+P`. La exportación lee siempre el original (`MediaPool.originalFrames()`). |
+| FFmpeg | `media/ffmpeg/*`, `workers/ffmpeg-worker.ts`, `vendor/ffmpeg/` | `@ffmpeg/core` 0.12.10 de un solo hilo (sin SharedArrayBuffer). Probe, decodificación a frames, extracción de audio, transcodificación. Se descarga tras 2 min sin uso. `FormatDetector` identifica el contenedor por magic bytes (16 KB). |
+| Audio | `media/audio/*`, `workers/pitch-worker.ts` | Pitch/stretch 0,25–4× (PSOLA + phase vocoder), EBU R128 (BS.1770-4, bloques de 400 ms, gates −70/−10), EQ de 5 bandas Biquad, compresor / limitador con lookahead / puerta (AudioWorklet), curvas de fade, enrutado de canales. Hook en `player/audio-mixer.ts`. |
+| Visión | `media/vision/*`, `render/vision-pipeline.ts`, `workers/chroma-worker.ts` | Chroma key (distancia YUV), supresión de derrame, luma key, feather de bordes, color grading de 12 parámetros en luz lineal, LUT `.cube` 3D con interpolación trilineal, cuentagotas. WebGL2 con fallback a Canvas 2D; worker de CPU para trabajo offline (previsualizaciones de LUT, exportación). |
+| Subtítulos | `media/subtitles/*` | SRT/VTT (BOM, etiquetas, cue settings, STYLE/REGION/NOTE, karaoke), parseo parcial con avisos, round-trip exacto, pistas dedicadas abajo al centro. |
+| Relink | `media/relink/*`, `workers/scanner-worker.ts` | Puntuación: nombre 0,4 · duración ±1 frame 0,3 · resolución 0,1 · hash 0,2 (si el hash coincide, 1,0). Automático si >0,8. Mantiene id y ediciones; es una sola operación deshacible. |
+| Importación | `media/import/*` | `BulkImporter` (AsyncGenerator, 1–8 en paralelo, agrupación, cancelable) y `MetadataExtractor` (lectura de moov: rotación, encoder, fecha). |
+| UI | `ui/inspector/*-section.ts`, `ui/modals/*`, `ui/media-context-menu.ts`, `app/*` | Secciones de chroma, color/LUT (intensidad, vista dividida), audio FX y subtítulos. Diálogos accesibles (focus trap, ARIA, Escape, restauración del foco), navegador de LUTs con flechas + Enter, menú contextual de medios, insignia "P". |
+
+Los efectos se guardan en `clip.extra.effects` (versionado). En la Fase 5
+pasarán a un modelo propio; el lector ya tolera claves desconocidas.
+
+### Matriz de compatibilidad
+
+| Capacidad | Chrome/Edge 113+ | Firefox 120+ | Safari 17+ |
+|---|---|---|---|
+| Decodificación (WebCodecs) | ✅ | ✅ (130+); antes, fallback `<video>`/FFmpeg | ✅ (vídeo); audio vía Web Audio |
+| Codificación de proxies | WebCodecs H.264 | FFmpeg.wasm (WebM VP8) | WebCodecs H.264 (FFmpeg si falla) |
+| HEVC / ProRes / AVI / FLV | Proxy vía FFmpeg | Proxy vía FFmpeg | HEVC nativo; el resto vía FFmpeg |
+| OPFS | ✅ | ✅ | ✅ |
+| WebGL2 (visión) | ✅ | ✅ | ✅ (fallback Canvas 2D si no hay contexto) |
+| AudioWorklet (puerta) | ✅ | ✅ | ✅ |
+| File System Access (carpetas) | ✅ | ❌ → `<input webkitdirectory>` | ❌ → `<input webkitdirectory>` |
+| EyeDropper API | ✅ | ❌ → clic en la previsualización | ❌ → clic en la previsualización |
+
+### Módulos auxiliares (no listados en el manifiesto)
+
+`workers/worker-client.ts` (RPC + cierre por inactividad a los 30 s),
+`editor/effect-operations.ts`, `media/import/format-support.ts`,
+`media/audio/{fft,biquad,dynamics,audio-buffer,audio-effects}.ts`,
+`media/clip-effects.ts`, `media/vision/{color-space,lut-library,vision-worker}.ts`,
+`media/relink/scanner-handlers.ts`, `ui/media-tools.ts` (registro de servicios para la UI),
+`ui/inspector/{fields,effect-host}.ts`, `ui/modals/dialog.ts`,
+`app/{media-toolkit,effect-resolvers}.ts`.
+
+### Notas de diseño
+
+- **Relink sin hash**: si un candidato no tiene hash comparable, el resto de
+  pesos se renormaliza (÷0,8) para que una coincidencia perfecta de nombre,
+  duración y resolución siga pudiendo superar 0,8.
+- **Feather**: en GPU es un desenfoque separable del alfa; en CPU el
+  `blurPlane` usa clamp-to-edge (no conserva energía en los bordes).
+- **Subtítulos**: el marcado original del cue va en `clip.extra.subtitle`,
+  así que exportar al mismo formato es byte a byte idéntico.
+- **FFmpeg**: el core precompilado tiene memoria fija, así que el
+  escalado 512 MB→1 GB del enunciado no es posible en runtime; documentado en
+  `vendor/ffmpeg/README.md`.
+- **Previsualización vs exportación**: el preview usa el proxy si existe y
+  está activado; la exportación usa `MediaPool.originalFrames()`.
+
+### Checklist demo de la Fase 4
+
+1. Importa un vídeo 1080p o 4K: aparece la insignia **P** con su progreso y luego "Proxy listo".
+2. `Ctrl+Shift+P` alterna previsualización proxy/original (botón **Proxy** en la cabecera).
+3. Clic derecho en un medio: metadatos, proxy 720p/360p, borrar proxy, volver a vincular, eliminar de OPFS.
+4. Inspector de un clip de vídeo → **Chroma key**: cuentagotas sobre el fondo verde y ajusta similitud/suavidad.
+5. **Color** → Explorar… (flechas + Enter), intensidad y vista dividida; Archivo → Cargar LUT… con un `.cube` (los errores indican la línea).
+6. Clip de audio → **Efectos de audio**: EQ, compresor, normalizar EBU R128, tono.
+7. Archivo → Importar subtítulos (`.srt`/`.vtt`) → pista nueva; Exportar SRT/VTT.
+8. Archivo → Importar carpeta… (concurrencia, agrupación, cancelar).
+9. Abre un proyecto cuyos medios no estén en OPFS → "Medios sin conexión…" → Buscar en carpeta → Aplicar.
 
 ## Running it
 
@@ -246,8 +316,8 @@ Faithfulness details worth knowing:
 |---|---|---|
 | 1 | Core model & project schema | done (`web/tests`, `web/README` history) |
 | 2 | Compositor, playback, editor shell, local storage | done (`web/tests`, history below) |
-| 3 | Interactive multitrack timeline with professional editing | **this document** |
-| 4 | Media pipeline polish (WebM/MKV demux, waveforms, proxies) | |
+| 3 | Interactive multitrack timeline with professional editing | done |
+| 4 | Advanced media pipeline: proxies, FFmpeg fallback, audio/vision, subtitles, relinking | **this document** |
 | 5 | Effects & keyframes in the UI | |
 | 6 | Export pipeline (MP4/WebM, local) | |
 

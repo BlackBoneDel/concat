@@ -9,7 +9,7 @@ export {
   type DemuxSample,
   type DemuxTrack,
 } from './demuxer.ts';
-export { MediaDecoder, type MediaInfo } from './decoder.ts';
+export { MediaDecoder, type MediaDecoderOptions, type MediaFallback, type MediaInfo } from './decoder.ts';
 export {
   MemoryThumbnailStore,
   generateThumbnail,
@@ -20,3 +20,13 @@ export {
   type ThumbnailStore,
 } from './thumbnail.ts';
 export { MediaPool, type MediaAsset, type MediaPoolOptions } from './media-pool.ts';
+
+// Fase 4 submodules (namespaced to keep names unambiguous).
+export * as proxy from './proxy/index.ts';
+export * as ffmpeg from './ffmpeg/index.ts';
+export * as audio from './audio/index.ts';
+export * as vision from './vision/index.ts';
+export * as subtitles from './subtitles/index.ts';
+export * as relink from './relink/index.ts';
+export * as importer from './import/index.ts';
+export { EFFECTS_KEY, emptyClipEffects, parseClipEffects, serializeClipEffects, type ClipEffects } from './clip-effects.ts';
