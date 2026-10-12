@@ -1,4 +1,4 @@
-# Concat Web — Fase 2: compositor, reproductor y shell del editor
+# Concat Web — Fase 3: timeline interactivo multitrack con edición profesional
 
 Port of [`jub0t/Concat`](https://github.com/jub0t/Concat) (the open-source,
 cross-platform video editor) to a **100% local web application**. No servers,
@@ -23,6 +23,39 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 5. **Local storage** — OPFS for the file bytes (mandatory on import),
    IndexedDB (`ConcatMediaDB` / `ConcatProjectDB`) for metadata and projects,
    `localStorage` for settings, autosave every 30s.
+
+**Fase 3 delivers** the professional editing layer:
+
+1. **Edit engine** — `editor/operations.ts` with 35 reversible operations
+   (`apply`/`inverse`/`merge`), every one validated (`EditError` → toast) and
+   pure: no operation mutates its input. Everything lives in `extra` maps the
+   model round-trips: markers, groups/links, clip enabled/color, track
+   name/lock/solo.
+2. **EditHistory** — ≥500 steps, atomic transactions (one undo per drag
+   gesture, Escape cancels), 300ms move/trim and 500ms property merge.
+3. **Selection / clipboard** — click, Ctrl toggle, Shift ranges, marquee;
+   copy/cut/paste with fresh ids, group/link structure preserved, missing
+   media lands disabled + red.
+4. **Snapping** — magnetic, ON by default, 10px threshold, `S` toggles,
+   Shift suppresses; priority playhead > markers > clip edges > seconds >
+   bounds, with visual guides.
+5. **Interactive timeline** — two stacked canvases (ruler + content), no DOM
+   per clip, virtualized tracks, 10–500 px/s zoom + minimap, tools V/C/B/N/Y/U
+   (select, blade, ripple, roll, slip, slide), insert/overwrite, groups
+   (Ctrl+G), video+audio links (Ctrl+L), per-track mute/solo/lock/visible/
+   rename/reorder/collapse.
+6. **Waveforms & thumbnails** — min/max peaks in a Web Worker at 128/512/2048
+   samples per bucket, cached in the `waveforms` store of `ConcatMediaDB`,
+   resolution picked per zoom; clip faces carry live thumbnails.
+7. **Transitions & markers** — crossfade/dissolve/fades/wipes/slides with
+   adjustable duration on the cut that flows *into* a clip; markers with
+   label/color/note edited from a modal.
+8. **Dynamic inspector** — project sheet (no selection), clip sheet (name,
+   audio, transform, speed, transition, keyframes ◆) and batch sheet
+   (2+ clips), every field a history step.
+9. **Rhythm** — autosave every 30s + restore on reopen, undo per gesture,
+   real-time canvas preview, all colors from theme variables, full keyboard
+   shortcuts that never fire while typing.
 
 ## Running it
 
@@ -68,6 +101,13 @@ web/
 ├── src/
 │   ├── main.ts           EditorApp: wires every service and flow
 │   ├── styles.css        themable chrome (variables set by ThemeManager)
+│   ├── editor/           Fase 3: the edit engine
+│   │   ├── operations.ts     35 reversible ops + EditError + helpers
+│   │   ├── history.ts        EditHistory: undo/redo, transactions, merge
+│   │   ├── selection.ts      SelectionManager + marker hit-testing
+│   │   ├── clipboard.ts      copy/cut/paste with fresh identities
+│   │   └── snapping.ts       SnapEngine: candidates + priority + threshold
+│   ├── session/edit-session.ts EditSession: high-level commands over it all
 │   ├── core/             ← port of the concat-core crate (Fase 1, untouched)
 │   │   ├── rational.ts   exact rational seconds (bigint, i64 contract)
 │   │   ├── time.ts       FrameRate, TimeRange
@@ -90,6 +130,8 @@ web/
 │   │   └── types.ts          RenderContext2D/RenderTarget/RenderImage/FramePool
 │   ├── media/            local media pipeline
 │   │   ├── demuxer.ts        container sniffing + MP4/MOV sample tables
+│   │   ├── waveform-generator.ts  peaks (min/max) + IndexedDB cache
+│   │   ├── waveform-worker.ts     the worker behind them
 │   │   ├── decoder.ts        WebCodecs first, <video> fallback, LRU frame cache
 │   │   ├── thumbnail.ts      scaled stills + cache
 │   │   └── media-pool.ts     MediaPool: decoders, frames, thumbnails
@@ -103,6 +145,11 @@ web/
 │   │   ├── project-store.ts  ConcatProjectDB records {name, document}
 │   │   └── settings-store.ts localStorage settings
 │   └── ui/               the shell
+│       ├── timeline/         Fase 3: view, ruler, clip/transitions/waveform
+│       │                     renderers, toolbar, minimap, zoom, menus…
+│       ├── interactions/     drag-manager, clip/trim/split/selection drags,
+│       │                     keyboard-shortcuts
+│       ├── inspector/        clip / project / multi sheets
 │       ├── editor-layout.ts  workspace grid + resizers
 │       ├── header-bar.ts     menus, save state, undo/redo, settings modal
 │       ├── media-panel.ts    import + library
@@ -139,7 +186,26 @@ web/
   compositor with recording doubles and zero casts. Strict TypeScript
   throughout: no `any`, no `@ts-ignore`, no `as unknown as`.
 
-## Test & coverage (Fase 2 modules)
+## Test & coverage
+
+**303 tests, 27 suites, 0 failures** (200 from Fase 1–2 kept green + 103 new).
+Fase-3 suites cover `apply` + `inverse` round-trips of every operation,
+history transactions/merge, selection, clipboard, snapping, waveforms and the
+integration flow (drag → undo → redo).
+
+Fase 3 modules (lines covered):
+
+| Module | Lines |
+|---|---|
+| `editor/snapping.ts` | 100% |
+| `session/edit-session.ts` | 94% |
+| `editor/selection.ts` | 97% |
+| `editor/history.ts` | 89% |
+| `editor/operations.ts` | 86% |
+| `editor/clipboard.ts` | 86% |
+| **`editor/` aggregate** | **87.5%** |
+
+Fase 2 modules (lines covered):
 
 | Module | Lines |
 |---|---|
@@ -179,8 +245,8 @@ Faithfulness details worth knowing:
 | Fase | Scope | Status |
 |---|---|---|
 | 1 | Core model & project schema | done (`web/tests`, `web/README` history) |
-| 2 | Compositor, playback, editor shell, local storage | **this document** |
-| 3 | Interactive multitrack timeline (ripple, snap, zoom polish) | next |
+| 2 | Compositor, playback, editor shell, local storage | done (`web/tests`, history below) |
+| 3 | Interactive multitrack timeline with professional editing | **this document** |
 | 4 | Media pipeline polish (WebM/MKV demux, waveforms, proxies) | |
 | 5 | Effects & keyframes in the UI | |
 | 6 | Export pipeline (MP4/WebM, local) | |

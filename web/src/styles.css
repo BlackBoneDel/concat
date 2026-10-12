@@ -938,3 +938,413 @@ body {
 ::-webkit-scrollbar-track {
   background: transparent;
 }
+
+/* ===========================================================================
+   Fase 3 — timeline interactivo, inspector dinámico
+   Colores SOLO desde variables de tema.
+   =========================================================================== */
+
+.timeline-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+  background: var(--bg-secondary);
+}
+
+.panel-empty {
+  padding: var(--spacing-md, 12px);
+  color: var(--text-tertiary);
+}
+
+/* -- Toolbar ------------------------------------------------------------- */
+
+.tl-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--border);
+  flex-wrap: wrap;
+}
+
+.tl-tool-btn {
+  min-width: 32px;
+  height: 28px;
+  padding: 0 8px;
+  border-radius: var(--radius-sm, 4px);
+  color: var(--text-secondary);
+}
+
+.tl-tool-btn.active,
+.tl-tool-btn[aria-pressed='true'] {
+  background: var(--accent-primary);
+  color: var(--text-primary);
+}
+
+.tl-toolbar-divider {
+  width: 1px;
+  height: 20px;
+  background: var(--border);
+  margin: 0 4px;
+}
+
+/* -- Zoom ---------------------------------------------------------------- */
+
+.tl-zoom-control {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.tl-zoom-control input[type='range'] {
+  width: 110px;
+  accent-color: var(--accent-primary);
+}
+
+.tl-zoom-label {
+  font-size: 11px;
+  color: var(--text-tertiary);
+  min-width: 56px;
+  text-align: right;
+}
+
+/* -- Layout principal ---------------------------------------------------- */
+
+.tl-main {
+  display: flex;
+  flex: 1;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.tl-track-headers {
+  width: 180px;
+  flex: none;
+  overflow: hidden;
+  border-right: 1px solid var(--border);
+  background: var(--bg-primary);
+  padding-top: 28px; /* altura del ruler */
+}
+
+.tl-scroll {
+  flex: 1;
+  overflow: auto;
+  position: relative;
+  background: var(--bg-secondary);
+}
+
+.tl-content-wrap {
+  position: relative;
+}
+
+.tl-canvas {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: block;
+}
+
+.tl-canvas-ruler {
+  position: sticky;
+  top: 0;
+  z-index: 3;
+}
+
+.tl-overlay {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+}
+
+/* -- Playhead ------------------------------------------------------------ */
+
+.tl-playhead,
+.tl-playhead-line {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  background: var(--error);
+  z-index: 5;
+  pointer-events: none;
+}
+
+.tl-playhead-line {
+  pointer-events: auto;
+  cursor: col-resize;
+}
+
+/* -- Track headers ------------------------------------------------------- */
+
+.tl-track-header {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 4px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  box-sizing: border-box;
+  overflow: hidden;
+}
+
+.tl-track-header[data-kind='audio'] {
+  border-left: 3px solid var(--success);
+}
+
+.tl-track-header[data-kind='video'] {
+  border-left: 3px solid var(--accent-primary);
+}
+
+.tl-track-name {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-primary);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: text;
+}
+
+.tl-track-rename {
+  font-size: 12px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--accent-primary);
+  border-radius: var(--radius-sm, 4px);
+  padding: 2px 4px;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.tl-track-buttons {
+  display: flex;
+  gap: 2px;
+  flex-wrap: wrap;
+}
+
+.tl-track-btn {
+  font-size: 10px;
+  min-width: 22px;
+  height: 20px;
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.tl-track-btn[aria-pressed='true'] {
+  background: var(--accent-primary);
+  color: var(--text-primary);
+}
+
+.tl-track-header[data-locked='true'] .tl-track-btn {
+  opacity: 0.5;
+}
+
+/* -- Selection box + snap guides ----------------------------------------- */
+
+.tl-selection-box {
+  position: absolute;
+  border: 1px solid var(--accent-primary);
+  background: color-mix(in srgb, var(--accent-primary) 18%, transparent);
+  z-index: 6;
+}
+
+.tl-snap-guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--warning);
+  z-index: 6;
+}
+
+.tl-snap-guide-playhead {
+  background: var(--error);
+}
+
+.tl-snap-guide-marker {
+  background: var(--accent-primary);
+}
+
+/* -- Minimap ------------------------------------------------------------- */
+
+.tl-minimap {
+  height: 44px;
+  border-top: 1px solid var(--border);
+  background: var(--bg-primary);
+  padding: 2px 8px;
+}
+
+.tl-minimap-canvas {
+  width: 100%;
+  display: block;
+  cursor: pointer;
+}
+
+/* -- Context menu -------------------------------------------------------- */
+
+.tl-context-menu {
+  position: fixed;
+  z-index: 1000;
+  min-width: 180px;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  box-shadow: var(--shadow-md, 0 8px 24px rgba(0, 0, 0, 0.4));
+  padding: 4px;
+  display: flex;
+  flex-direction: column;
+}
+
+.tl-menu-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 10px;
+  background: none;
+  border: none;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  border-radius: var(--radius-sm, 4px);
+  cursor: pointer;
+}
+
+.tl-menu-item:hover,
+.tl-menu-item:focus-visible {
+  background: var(--accent-primary);
+  outline: none;
+}
+
+.tl-menu-item.danger {
+  color: var(--error);
+}
+
+.tl-menu-item kbd {
+  font-size: 10px;
+  color: var(--text-tertiary);
+}
+
+/* -- Lista de clips accesible -------------------------------------------- */
+
+.tl-clip-list {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  margin: -1px;
+  padding: 0;
+  list-style: none;
+}
+
+.tl-clip-list .timeline-clip {
+  display: block;
+}
+
+/* -- Inspector ----------------------------------------------------------- */
+
+.inspector-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  overflow-y: auto;
+  height: 100%;
+  box-sizing: border-box;
+}
+
+.inspector-group {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md, 6px);
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+.inspector-group-title {
+  margin: 0 0 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-tertiary);
+}
+
+.field-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+
+.field-row .input,
+.field-row input[type='text'],
+.field-row input[type='number'],
+.field-row textarea,
+.field-row select {
+  flex: 1;
+  max-width: 150px;
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  padding: 4px 6px;
+  font-size: 12px;
+}
+
+.field-readonly {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.input-color {
+  width: 42px;
+  height: 24px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm, 4px);
+  background: var(--bg-tertiary);
+  padding: 0;
+}
+
+.color-swatch {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+
+.keyframe-row {
+  flex-wrap: wrap;
+}
+
+.keyframe-diamond {
+  background: none;
+  border: none;
+  color: var(--warning);
+  cursor: pointer;
+  font-size: 12px;
+  padding: 0 2px;
+}
+
+.keyframe-diamond:hover {
+  color: var(--accent-hover);
+}
+
+.keyframe-add {
+  font-size: 11px;
+  padding: 2px 6px;
+}
+
+.marker-editor .field-row {
+  margin-bottom: 10px;
+}

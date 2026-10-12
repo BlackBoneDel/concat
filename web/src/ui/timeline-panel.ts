@@ -2,369 +2,724 @@
 // SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
 
 /**
- * The timeline panel: lanes, clips and the playhead.
- *
- * Every drag mutates the *document* (`DocumentClip.start`/`duration`/
- * `sourceStart`) and then `session.rebuild()` re-derives the engine — the
- * timeline is never a second source of truth. Clip moves and trims snap to
- * the grid when `snapToGrid` is on; clicking the ruler or a lane seeks.
+ * The interactive multitrack timeline panel (Fase 3). Canvas-rendered,
+ * virtualized, with tools V C B N Y U, magnetic snapping, groups/links,
+ * markers, transitions, waveforms, thumbnails, minimap and one-history-
+ * step-per-gesture editing.
  */
 
 import { Rational } from '../core/rational.ts';
-import type { DocumentClip, DocumentTrack } from '../model/document.ts';
+import type { EditSession } from '../session/edit-session.ts';
+import {
+  AddMarkerOperation,
+  DeleteClipOperation,
+  DeleteClipsOperation,
+  DuplicateClipOperation,
+  SetTrackPropertyOperation,
+  currentTimeline,
+  type EditOperation,
+  type MarkerData,
+} from '../editor/operations.ts';
+import {
+  ContextMenu,
+  MAX_PIXELS_PER_SECOND,
+  MIN_PIXELS_PER_SECOND,
+  Minimap,
+  Playhead,
+  SelectionBox,
+  SnapGuides,
+  TimelineView,
+  Toolbar,
+  TrackHeader,
+  ZoomControl,
+  openMarkerEditor,
+  type ClipPreviewer,
+  type DrawableImage,
+  type ToolId,
+} from './timeline/index.ts';
+import {
+  DragManager,
+} from './interactions/drag-manager.ts';
+import {
+  installKeyboardShortcuts,
+  type ShortcutActions,
+} from './interactions/keyboard-shortcuts.ts';
 import type { AppContext } from './app-context.ts';
 
-/** Pixels per second at zoom 1. */
-const BASE_PPS = 60;
-/** Snap grid in seconds when enabled. */
-const SNAP_SECONDS = 0.25;
-
-/** The bottom panel of the shell. */
+/** The Fase-3 timeline panel. */
 export class TimelinePanel {
+  private readonly app: AppContext;
   private readonly root: HTMLElement;
-  private readonly ctx: AppContext;
-  private readonly laneLayer: HTMLElement;
-  private readonly clipLayer: HTMLElement;
-  private readonly playhead: HTMLElement;
-  private readonly ruler: HTMLElement;
-  private readonly scroller: HTMLElement;
-  private pixelsPerSecond = BASE_PPS;
-  private drag: DragState | null = null;
+  private session: EditSession | null = null;
+  private view: TimelineView | null = null;
+  private drag: DragManager | null = null;
+  private toolbar: Toolbar | null = null;
+  private zoomControl: ZoomControl | null = null;
+  private minimap: Minimap | null = null;
+  private selectionBox: SelectionBox | null = null;
+  private snapGuides: SnapGuides | null = null;
+  private playhead: Playhead | null = null;
+  private headers = new Map<string, TrackHeader>();
+  private shortcuts: { dispose(): void } | null = null;
+  private tool: ToolId = 'select';
+  private readonly trackHeadersEl!: HTMLElement;
+  private readonly scrollEl!: HTMLElement;
+  private readonly overlayEl!: HTMLElement;
+  private readonly contentWrap!: HTMLElement;
+  private readonly abort = new AbortController();
+  private playheadFrame = 0;
+  private readonly clipListEl!: HTMLElement;
 
   /**
-   * @param root the panel element.
-   * @param ctx the app services.
+   * @param root the panel root (`#timeline-panel`).
+   * @param app the service bag.
    */
-  constructor(root: HTMLElement, ctx: AppContext) {
+  constructor(root: HTMLElement, app: AppContext) {
+    this.app = app;
     this.root = root;
-    this.ctx = ctx;
+    this.root.textContent = '';
+    this.root.className = 'timeline-panel';
 
-    const header = document.createElement('div');
-    header.className = 'panel-header timeline-header';
-    const title = document.createElement('h2');
-    title.className = 'panel-title';
-    title.textContent = 'Timeline';
-    header.appendChild(title);
+    const session = app.editSession;
+    if (!session) {
+      const message = document.createElement('p');
+      message.className = 'panel-empty';
+      message.textContent = 'Sesión de edición no disponible.';
+      this.root.appendChild(message);
+      return;
+    }
+    this.session = session;
 
-    const zoomOut = document.createElement('button');
-    zoomOut.type = 'button';
-    zoomOut.className = 'btn btn-icon btn-small';
-    zoomOut.textContent = '−';
-    zoomOut.title = 'Alejar (Ctrl+-)';
-    zoomOut.addEventListener('click', () => this.zoomOut());
-    header.appendChild(zoomOut);
-    const zoomIn = document.createElement('button');
-    zoomIn.type = 'button';
-    zoomIn.className = 'btn btn-icon btn-small';
-    zoomIn.textContent = '+';
-    zoomIn.title = 'Acercar (Ctrl+=)';
-    zoomIn.addEventListener('click', () => this.zoomIn());
-    header.appendChild(zoomIn);
-    const zoomFit = document.createElement('button');
-    zoomFit.type = 'button';
-    zoomFit.className = 'btn btn-icon btn-small';
-    zoomFit.textContent = '⤢';
-    zoomFit.title = 'Ajustar (Ctrl+0)';
-    zoomFit.addEventListener('click', () => this.zoomFit());
-    header.appendChild(zoomFit);
+    // Layout: toolbar on top; headers + scrolling content below.
+    this.trackHeadersEl = document.createElement('div');
+    this.trackHeadersEl.className = 'tl-track-headers';
+    this.scrollEl = document.createElement('div');
+    this.scrollEl.className = 'tl-scroll';
+    this.scrollEl.tabIndex = 0;
+    this.scrollEl.setAttribute('role', 'application');
+    this.scrollEl.setAttribute('aria-label', 'Timeline interactivo');
+    this.contentWrap = document.createElement('div');
+    this.contentWrap.className = 'tl-content-wrap';
+    this.overlayEl = document.createElement('div');
+    this.overlayEl.className = 'tl-overlay';
+    this.contentWrap.appendChild(this.overlayEl);
+    this.scrollEl.appendChild(this.contentWrap);
 
-    const addTrack = document.createElement('button');
-    addTrack.type = 'button';
-    addTrack.className = 'btn btn-small btn-ghost';
-    addTrack.textContent = '+ Pista';
-    addTrack.addEventListener('click', () => this.addTrack());
-    header.appendChild(addTrack);
-    this.root.appendChild(header);
+    const main = document.createElement('div');
+    main.className = 'tl-main';
+    main.append(this.trackHeadersEl, this.scrollEl);
+    this.root.appendChild(main);
 
-    this.scroller = document.createElement('div');
-    this.scroller.className = 'timeline-scroll';
-    this.ruler = document.createElement('div');
-    this.ruler.className = 'timeline-ruler';
-    this.laneLayer = document.createElement('div');
-    this.laneLayer.className = 'timeline-lanes';
-    this.clipLayer = document.createElement('div');
-    this.clipLayer.className = 'timeline-clips';
-    this.playhead = document.createElement('div');
-    this.playhead.className = 'timeline-playhead';
+    // Accessible clip list (screen readers; also the DOM mirror of the canvas).
+    this.clipListEl = document.createElement('ul');
+    this.clipListEl.className = 'tl-clip-list';
+    this.clipListEl.setAttribute('role', 'list');
+    this.clipListEl.setAttribute('aria-label', 'Clips del timeline');
+    this.root.appendChild(this.clipListEl);
 
-    const body = document.createElement('div');
-    body.className = 'timeline-body';
-    body.appendChild(this.laneLayer);
-    body.appendChild(this.clipLayer);
-    body.appendChild(this.playhead);
-    this.scroller.appendChild(this.ruler);
-    this.scroller.appendChild(body);
-    this.root.appendChild(this.scroller);
+    // View.
+    this.view = new TimelineView({
+      container: this.contentWrap,
+      overlay: this.overlayEl,
+      preview: this.previewer(),
+      getDocument: () => session.document,
+      markers: (): MarkerData[] => session.markers(),
+      playheadSeconds: (): number => this.app.player.currentTime.asNumber(),
+      setPlayhead: (seconds: number): void => {
+        this.app.player.seekTo(Rational.approximate(seconds) ?? Rational.ZERO);
+      },
+      selection: session.selection,
+    });
 
-    this.wireSeek(this.ruler);
-    this.wireSeek(body);
-    this.wireDrag(body);
-    this.refresh();
+    // Controls.
+    const actions = this.toolbarActions();
+    this.zoomControl = new ZoomControl({
+      view: this.view,
+      onChange: () => {
+        this.syncSize();
+        this.minimap?.render();
+        this.saveZoomSetting();
+      },
+    });
+    this.toolbar = new Toolbar(actions, this.zoomControl.element);
+    this.root.insertBefore(this.toolbar.element, main);
 
-    this.ctx.player.onTimeUpdate = (time) => this.movePlayhead(time);
-    document.addEventListener('timeline-changed', () => this.refresh());
-    this.zoomFit();
+    this.selectionBox = new SelectionBox(this.overlayEl);
+    this.snapGuides = new SnapGuides(this.overlayEl);
+    this.playhead = new Playhead(this.contentWrap);
+    this.minimap = new Minimap({ view: this.view, getDocument: () => session.document });
+    this.root.appendChild(this.minimap.element);
+
+    // Interactions.
+    this.drag = new DragManager(
+      {
+        view: this.view,
+        history: session.history,
+        selection: session.selection,
+        snap: session.snapping,
+        getDocument: () => session.document,
+        markers: (): MarkerData[] => session.markers(),
+        tool: () => this.tool,
+        isSnappingEnabled: () => session.snapping.enabled,
+        playheadSeconds: (): number => this.app.player.currentTime.asNumber(),
+        onChange: () => this.onEdited(),
+        onPreview: () => this.updateOverlays(),
+        onContextMenu: (x, y, clipId) => this.openMenu(x, y, clipId),
+      },
+      this.contentWrap,
+    );
+
+    this.shortcuts = installKeyboardShortcuts(this.shortcutActions());
+
+    // Scrolling: headers follow vertically; content drives the view.
+    const signal = this.abort.signal;
+    this.scrollEl.addEventListener(
+      'scroll',
+      () => {
+        this.trackHeadersEl.scrollTop = this.scrollEl.scrollTop;
+        this.view?.setScrollTop(this.scrollEl.scrollTop);
+        this.view?.setScrollTime(this.scrollEl.scrollLeft / Math.max(1, this.view.zoom()));
+      },
+      { signal },
+    );
+    this.scrollEl.addEventListener(
+      'wheel',
+      (event) => {
+        if (event.ctrlKey) {
+          event.preventDefault();
+          const factor = event.deltaY < 0 ? 1.15 : 1 / 1.15;
+          const zoom = this.view ? this.view.zoom() * factor : 80;
+          this.view?.setZoom(
+            Math.min(MAX_PIXELS_PER_SECOND, Math.max(MIN_PIXELS_PER_SECOND, zoom)),
+            this.view.xToTime(event.offsetX),
+          );
+          this.zoomControl?.refresh();
+          this.syncSize();
+          this.minimap?.render();
+        }
+      },
+      { signal },
+    );
+
+    // Keep the canvases sized and the playhead riding.
+    document.addEventListener('timeline-changed', () => this.refreshAll(), { signal });
+    document.addEventListener('selection-changed', () => this.refreshAll(), { signal });
+    document.addEventListener('project-changed', () => this.refreshAll(), { signal });
+    document.addEventListener('session-reset', () => this.refreshAll(), { signal });
+
+    this.refreshAll();
+    this.startPlayheadLoop();
   }
 
-  /** Rebuilds lanes, clips and the ruler from the document. */
+  /** Tears the panel down. */
+  dispose(): void {
+    this.abort.abort();
+    this.drag?.dispose();
+    this.drag = null;
+    this.shortcuts?.dispose();
+    this.shortcuts = null;
+    this.toolbar?.dispose();
+    this.zoomControl?.dispose();
+    this.minimap?.dispose();
+    this.selectionBox?.dispose();
+    this.snapGuides?.dispose();
+    this.playhead?.dispose();
+    for (const header of this.headers.values()) header.dispose();
+    this.headers.clear();
+    this.view?.dispose();
+    this.view = null;
+    if (this.playheadFrame !== 0) cancelAnimationFrame(this.playheadFrame);
+    this.playheadFrame = 0;
+    this.root.textContent = '';
+    document.removeEventListener('timeline-changed', () => this.refreshAll());
+  }
+
+  /** The thumbnail source: frames pulled from the stored media bytes. */
+  private previewer(): ClipPreviewer {
+    return {
+      frameAt: async (sourceTimeSeconds, clip): Promise<DrawableImage | null> => {
+        try {
+          const blob = await this.app.mediaStore.readFile(clip.mediaId);
+          if (!blob) return null;
+          if (typeof createImageBitmap === 'function' && blob.type.startsWith('image/')) {
+            return await createImageBitmap(blob);
+          }
+          return await grabVideoFrame(blob, sourceTimeSeconds);
+        } catch (error) {
+          console.warn('No se pudo generar el thumbnail', error);
+          return null;
+        }
+      },
+    };
+  }
+
+  /** Runs one operation through the session (toast on error). */
+  private run(op: EditOperation): void {
+    this.session?.run(op);
+    this.onEdited();
+  }
+
+  /** Public refresh (app events). */
   refresh(): void {
-    this.laneLayer.replaceChildren();
-    this.clipLayer.replaceChildren();
-    const timeline = this.ctx.session.timeline;
-    const tracks = timeline.tracks;
-    const totalSeconds = Math.max(10, this.ctx.session.duration().asNumber() + 5);
-    const width = totalSeconds * this.pixelsPerSecond;
-
-    // Ruler ticks every second (every 5 labelled).
-    this.ruler.replaceChildren();
-    this.ruler.style.width = `${width}px`;
-    for (let second = 0; second <= totalSeconds; second += 1) {
-      const tick = document.createElement('div');
-      tick.className = second % 5 === 0 ? 'ruler-tick major' : 'ruler-tick';
-      tick.style.left = `${second * this.pixelsPerSecond}px`;
-      if (second % 5 === 0) {
-        const label = document.createElement('span');
-        label.className = 'ruler-label';
-        label.textContent = formatSeconds(second);
-        tick.appendChild(label);
-      }
-      this.ruler.appendChild(tick);
-    }
-
-    for (const track of tracks) {
-      this.laneLayer.appendChild(this.laneHeader(track));
-      const lane = document.createElement('div');
-      lane.className = 'timeline-lane';
-      lane.style.width = `${width}px`;
-      lane.dataset['trackId'] = track.id;
-      this.clipLayer.appendChild(lane);
-      for (const clip of timeline.clips.filter((item) => item.trackId === track.id)) {
-        lane.appendChild(this.clipElement(clip, track));
-      }
-    }
-    this.movePlayhead(this.ctx.player.currentTime);
+    this.refreshAll();
   }
 
-  /** Where the playhead sits on screen. */
-  movePlayhead(time: Rational): void {
-    this.playhead.style.left = `${time.asNumber() * this.pixelsPerSecond}px`;
-  }
-
-  // -- internals -----------------------------------------------------------
-
-  private setZoom(pixelsPerSecond: number): void {
-    this.pixelsPerSecond = Math.max(8, Math.min(400, pixelsPerSecond));
-    this.refresh();
-  }
-
-  /** Zooms in one step (Ctrl+=). */
+  /** Zooms in (menu/shortcut). */
   zoomIn(): void {
-    this.setZoom(this.pixelsPerSecond * 1.5);
+    this.view?.setZoom((this.view?.zoom() ?? 80) * 1.25);
+    this.zoomControl?.refresh();
+    this.syncSize();
   }
 
-  /** Zooms out one step (Ctrl+-). */
+  /** Zooms out (menu/shortcut). */
   zoomOut(): void {
-    this.setZoom(this.pixelsPerSecond / 1.5);
+    this.view?.setZoom((this.view?.zoom() ?? 80) / 1.25);
+    this.zoomControl?.refresh();
+    this.syncSize();
   }
 
-  /** Fits the whole edit in the visible width (Ctrl+0). */
+  /** Zooms to fit (menu/shortcut). */
   zoomFit(): void {
-    const available = this.scroller.clientWidth || 800;
-    const duration = Math.max(1, this.ctx.session.duration().asNumber() + 2);
-    this.setZoom(available / duration);
+    this.zoomControl?.zoomFit();
+    this.syncSize();
+    this.minimap?.render();
   }
 
-  private addTrack(): void {
-    this.ctx.history.push(this.ctx.session.document, this.ctx.session.documentSettings());
-    const timeline = this.ctx.session.timeline;
-    const number = timeline.tracks.length + 3;
-    timeline.tracks.push({
-      id: `T${number}`,
-      visible: true,
-      muted: false,
-      extra: {},
-    });
-    this.ctx.session.rebuild();
-    this.ctx.session.dirty = true;
-    this.refresh();
-    this.ctx.requestRender();
-    this.ctx.requestAutosave();
+  /** Everything is up to date after an edit. */
+  private onEdited(): void {
+    this.view?.relayout();
+    this.view?.requestRender();
+    this.syncSize();
+    this.buildHeaders();
+    this.minimap?.render();
+    this.app.requestRender();
+    this.app.requestAutosave();
   }
 
-  /** A track header: name plus visibility, mute and solo. */
-  private laneHeader(track: DocumentTrack): HTMLElement {
-    const header = document.createElement('div');
-    header.className = 'track-header';
-    const name = document.createElement('span');
-    name.className = 'track-name';
-    name.textContent = track.id;
-    header.appendChild(name);
-
-    const controls = document.createElement('span');
-    controls.className = 'track-controls';
-    const visible = this.toggle('👁', 'Ocultar/mostrar pista', !track.visible, (on) => {
-      track.visible = !on;
-      this.commitChange();
-    });
-    controls.appendChild(visible);
-    const muted = this.toggle('M', 'Silenciar pista', track.muted, (on) => {
-      track.muted = on;
-      this.commitChange();
-    });
-    controls.appendChild(muted);
-    header.appendChild(controls);
-    return header;
+  /** Rebuilds headers + geometry + paint. */
+  private refreshAll(): void {
+    if (!this.session || !this.view) return;
+    this.view.relayout();
+    this.syncSize();
+    this.buildHeaders();
+    this.buildClipList();
+    this.view.requestRender();
+    this.minimap?.render();
+    this.zoomControl?.refresh();
+    this.toolbar?.setTool(
+      this.tool,
+      this.session.snapping.enabled,
+      this.session.history.canUndo(),
+      this.session.history.canRedo(),
+    );
   }
 
-  /** A small on/off button. */
-  private toggle(label: string, title: string, active: boolean, onChange: (active: boolean) => void): HTMLElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `btn btn-icon btn-small${active ? ' active' : ''}`;
-    button.textContent = label;
-    button.title = title;
-    button.addEventListener('click', () => {
-      const next = !button.classList.contains('active');
-      button.classList.toggle('active', next);
-      onChange(next);
-    });
-    return button;
+  /** Mirrors the clips as an accessible DOM list. */
+  private buildClipList(): void {
+    if (!this.session) return;
+    const timeline = currentTimeline(this.session.document);
+    this.clipListEl.textContent = '';
+    for (const clip of timeline.clips) {
+      const item = document.createElement('li');
+      item.className = 'timeline-clip';
+      item.dataset['clipId'] = clip.id;
+      item.textContent = clip.name === '' ? clip.id : clip.name;
+      item.title = `${clip.name} (${clip.start.toFixed(2)}s +${clip.duration.toFixed(2)}s)`;
+      this.clipListEl.appendChild(item);
+    }
   }
 
-  /** One clip block. */
-  private clipElement(clip: DocumentClip, track: DocumentTrack): HTMLElement {
-    const element = document.createElement('div');
-    element.className = `timeline-clip clip-${clip.kind}${this.ctx.selectedClipId === clip.id ? ' selected' : ''}`;
-    if (!track.visible) element.classList.add('clip-hidden');
-    element.dataset['clipId'] = clip.id;
-    element.style.left = `${clip.start * this.pixelsPerSecond}px`;
-    element.style.width = `${Math.max(4, clip.duration * this.pixelsPerSecond)}px`;
-
-    const label = document.createElement('span');
-    label.className = 'clip-label';
-    label.textContent = clip.name === '' ? clip.kind : clip.name;
-    element.appendChild(label);
-
-    const trimLeft = document.createElement('span');
-    trimLeft.className = 'clip-trim trim-left';
-    trimLeft.title = 'Recorta el inicio';
-    element.appendChild(trimLeft);
-    const trimRight = document.createElement('span');
-    trimRight.className = 'clip-trim trim-right';
-    trimRight.title = 'Recorta el final';
-    element.appendChild(trimRight);
-
-    element.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
-      event.stopPropagation();
-      this.ctx.selectClip(clip.id);
-      this.refresh();
-      this.beginDrag(event, clip, element);
-    });
-    element.addEventListener('dblclick', () => {
-      this.ctx.player.seekTo(Rational.approximate(clip.start) ?? Rational.ZERO);
-    });
-    return element;
+  /** Sizes the content wrap to the full timeline. */
+  private syncSize(): void {
+    if (!this.view) return;
+    this.contentWrap.style.width = `${Math.ceil(this.view.contentWidth())}px`;
+    this.contentWrap.style.height = `${Math.ceil(this.view.contentHeight() + this.view.rulerHeight)}px`;
   }
 
-  /** Click-empty-to-seek. */
-  private wireSeek(target: HTMLElement): void {
-    target.addEventListener('pointerdown', (event) => {
-      if (event.button !== 0) return;
-      if (event.target instanceof HTMLElement && event.target.closest('.timeline-clip')) return;
-      const rect = this.clipLayer.getBoundingClientRect();
-      const x = event.clientX - rect.left;
-      this.ctx.selectClip(null);
-      this.refresh();
-      this.ctx.player.seekTo(Rational.approximate(Math.max(0, x / this.pixelsPerSecond)) ?? Rational.ZERO);
-    });
-  }
-
-  /** Clip move and trim drags. */
-  private wireDrag(layer: HTMLElement): void {
-    layer.addEventListener('pointermove', (event) => {
-      const drag = this.drag;
-      if (!drag) return;
-      const deltaSeconds = (event.clientX - drag.startX) / this.pixelsPerSecond;
-      const snap = (value: number): number =>
-        this.ctx.settings.snapToGrid
-          ? Math.round(value / SNAP_SECONDS) * SNAP_SECONDS
-          : Math.round(value * 1000) / 1000;
-
-      if (drag.mode === 'move') {
-        drag.clip.start = Math.max(0, snap(drag.clipStart + deltaSeconds));
-      } else if (drag.mode === 'trim-left') {
-        const shift = Math.max(-drag.clipStart, snap(drag.clipStart + deltaSeconds) - drag.clipStart);
-        drag.clip.start = drag.clipStart + shift;
-        drag.clip.duration = Math.max(1 / 60, drag.clipDuration - shift);
-        drag.clip.sourceStart = Math.max(0, drag.sourceStart + shift * drag.clip.speed);
-      } else {
-        drag.clip.duration = Math.max(1 / 60, snap(drag.clipDuration + deltaSeconds));
+  /** Rebuilds the track header column. */
+  private buildHeaders(): void {
+    if (!this.session || !this.view) return;
+    const doc = this.session.document;
+    const timeline = currentTimeline(doc);
+    const seen = new Set<string>();
+    for (const track of timeline.tracks) {
+      seen.add(track.id);
+      let header = this.headers.get(track.id);
+      if (!header) {
+        header = new TrackHeader(track.id, {
+          getDocument: () => this.session!.document,
+          run: (op) => this.run(op),
+          relayout: () => {
+            this.view?.relayout();
+            this.syncSize();
+          },
+        });
+        this.headers.set(track.id, header);
+        this.trackHeadersEl.appendChild(header.element);
       }
-      drag.element.style.left = `${drag.clip.start * this.pixelsPerSecond}px`;
-      drag.element.style.width = `${Math.max(4, drag.clip.duration * this.pixelsPerSecond)}px`;
-    });
-
-    const end = (event: PointerEvent): void => {
-      if (!this.drag) return;
-      if (this.drag.element.hasPointerCapture(event.pointerId)) {
-        this.drag.element.releasePointerCapture(event.pointerId);
+      header.refresh();
+    }
+    for (const [id, header] of this.headers) {
+      if (!seen.has(id)) {
+        header.dispose();
+        this.headers.delete(id);
       }
-      this.drag = null;
-      this.commitChange();
+    }
+  }
+
+  /** Marquee + snap guides while a gesture runs. */
+  private updateOverlays(): void {
+    if (!this.view || !this.drag || !this.selectionBox || !this.snapGuides) return;
+    const marquee = this.drag.marquee();
+    if (marquee) {
+      this.selectionBox.show(marquee.fromX, marquee.fromY, marquee.toX, marquee.toY);
+    } else {
+      this.selectionBox.hide();
+    }
+    // Snap guides: show the target the engine would pick right now.
+    const preview = this.view.dragPreview();
+    if (preview && this.session?.snapping.enabled) {
+      const candidates = this.session.snapping.computeCandidates(
+        this.session.document,
+        [...preview.offsets.keys()],
+        this.app.player.currentTime,
+        this.session.markers(),
+      );
+      const moving = [...preview.offsets.values()];
+      const first = moving[0];
+      if (first) {
+        const clipId = [...preview.offsets.keys()][0] ?? '';
+        void clipId;
+        const time = this.app.player.currentTime.asNumber() + first.deltaTime;
+        const result = this.session.snapping.snap(
+          Rational.approximate(time) ?? Rational.ZERO,
+          this.view.zoom(),
+          candidates,
+        );
+        if (result.snappedTo) {
+          this.snapGuides.show([result.snappedTo], (seconds) => this.view!.timeToX(seconds));
+        } else {
+          this.snapGuides.clear();
+        }
+      }
+    } else {
+      this.snapGuides.clear();
+    }
+  }
+
+  /** Opens the context menu. */
+  private openMenu(x: number, y: number, clipId: string | null): void {
+    if (!this.session) return;
+    const items = [];
+    if (clipId) {
+      const selection = this.session.selection.selectedClipIds;
+      const ids = selection.has(clipId) ? [...selection] : [clipId];
+      items.push(
+        {
+          label: 'Duplicar',
+          shortcut: 'Ctrl+D',
+          onSelect: () => {
+            this.session?.duplicateClips(ids);
+            this.onEdited();
+          },
+        },
+        {
+          label: 'Eliminar',
+          shortcut: 'Supr',
+          danger: true,
+          onSelect: () => {
+            if (ids.length === 1) this.session?.run(new DeleteClipOperation(ids[0]!));
+            else this.session?.run(new DeleteClipsOperation(ids));
+            this.onEdited();
+          },
+        },
+        {
+          label: 'Agrupar',
+          shortcut: 'Ctrl+G',
+          onSelect: () => {
+            this.session?.groupClips(ids);
+            this.onEdited();
+          },
+        },
+        {
+          label: 'Vincular',
+          shortcut: 'Ctrl+L',
+          onSelect: () => {
+            this.session?.linkClips(ids);
+            this.onEdited();
+          },
+        },
+        {
+          label: 'Habilitar/deshabilitar',
+          shortcut: 'E',
+          onSelect: () => {
+            for (const id of ids) this.session?.toggleClipEnabled(id);
+            this.onEdited();
+          },
+        },
+      );
+    } else {
+      items.push(
+        {
+          label: 'Añadir marker',
+          shortcut: 'M',
+          onSelect: () => {
+            this.session?.run(
+              new AddMarkerOperation(this.app.player.currentTime, ''),
+            );
+            this.onEdited();
+          },
+        },
+        {
+          label: 'Pegar',
+          shortcut: 'Ctrl+V',
+          onSelect: () => {
+            const timeline = currentTimeline(this.session!.document);
+            const first = timeline.tracks[0];
+            if (first) {
+              this.session?.pasteClips(this.app.player.currentTime.asNumber(), first.id);
+              this.onEdited();
+            }
+          },
+        },
+      );
+    }
+    new ContextMenu(x, y, items);
+  }
+
+  /** Toolbar wiring. */
+  private toolbarActions(): ConstructorParameters<typeof Toolbar>[0] {
+    return {
+      setTool: (tool) => {
+        this.tool = tool;
+        this.refreshAll();
+      },
+      toggleSnapping: () => {
+        if (!this.session) return;
+        this.session.snapping.setEnabled(!this.session.snapping.enabled);
+        this.refreshAll();
+      },
+      splitAtPlayhead: () => {
+        const time = this.app.player.currentTime.asNumber();
+        const timeline = this.session ? currentTimeline(this.session.document) : null;
+        if (!this.session || !timeline) return;
+        const ops: EditOperation[] = [];
+        for (const clip of timeline.clips) {
+          const tail = this.session.splitClip(clip.id, time);
+          void tail;
+        }
+        void ops;
+        this.onEdited();
+      },
+      deleteSelection: () => {
+        if (!this.session) return;
+        const ids = [...this.session.selection.selectedClipIds];
+        if (ids.length > 0) {
+          this.session.deleteClips(ids);
+          this.onEdited();
+        }
+      },
+      duplicateSelection: () => {
+        if (!this.session) return;
+        this.session.duplicateClips([...this.session.selection.selectedClipIds]);
+        this.onEdited();
+      },
+      groupSelection: () => {
+        if (!this.session) return;
+        this.session.groupClips([...this.session.selection.selectedClipIds]);
+        this.onEdited();
+      },
+      linkSelection: () => {
+        if (!this.session) return;
+        this.session.linkClips([...this.session.selection.selectedClipIds]);
+        this.onEdited();
+      },
+      addMarker: () => {
+        if (!this.session) return;
+        this.session.run(new AddMarkerOperation(this.app.player.currentTime, ''));
+        this.onEdited();
+      },
+      undo: () => {
+        this.session?.undo();
+        this.onEdited();
+      },
+      redo: () => {
+        this.session?.redo();
+        this.onEdited();
+      },
+      addTrack: (kind) => {
+        if (!this.session) return;
+        this.session.addTrack(kind);
+        this.onEdited();
+      },
     };
-    layer.addEventListener('pointerup', end);
-    layer.addEventListener('pointercancel', end);
-    layer.addEventListener('lostpointercapture', () => {
-      this.drag = null;
+  }
+
+  /** Keyboard wiring. */
+  private shortcutActions(): ShortcutActions {
+    return {
+      setTool: (tool) => {
+        this.tool = tool;
+        this.refreshAll();
+      },
+      toggleSnapping: () => this.toolbarActions().toggleSnapping(),
+      togglePlayback: () => {
+        if (this.app.player.isPlaying) this.app.player.pause();
+        else this.app.player.play();
+      },
+      goHome: () => this.app.player.seekTo(Rational.ZERO),
+      goEnd: () => this.app.player.seekTo(this.app.player.duration),
+      stepBackward: () => this.app.player.stepBackward(),
+      stepForward: () => this.app.player.stepForward(),
+      splitAtPlayhead: () => this.toolbarActions().splitAtPlayhead(),
+      deleteSelection: () => this.toolbarActions().deleteSelection(),
+      rippleDeleteSelection: () => {
+        if (!this.session) return;
+        const ids = [...this.session.selection.selectedClipIds];
+        if (ids.length > 0) {
+          this.session.deleteClips(ids, 'ripple');
+          this.onEdited();
+        }
+      },
+      duplicateSelection: () => this.toolbarActions().duplicateSelection(),
+      selectAll: () => {
+        if (!this.session) return;
+        this.session.selection.selectAll(this.session.document);
+        this.onEdited();
+      },
+      selectNone: () => {
+        this.session?.selection.clearSelection();
+        this.onEdited();
+      },
+      groupSelection: () => this.toolbarActions().groupSelection(),
+      ungroupSelection: () => {
+        if (!this.session) return;
+        this.session.ungroupClips([...this.session.selection.selectedClipIds]);
+        this.onEdited();
+      },
+      linkSelection: () => this.toolbarActions().linkSelection(),
+      unlinkSelection: () => {
+        if (!this.session) return;
+        this.session.unlinkClips([...this.session.selection.selectedClipIds]);
+        this.onEdited();
+      },
+      copy: () => {
+        if (!this.session) return;
+        this.session.copyClips([...this.session.selection.selectedClipIds]);
+      },
+      cut: () => {
+        if (!this.session) return;
+        this.session.cutClips([...this.session.selection.selectedClipIds]);
+        this.onEdited();
+      },
+      paste: () => {
+        const timeline = this.session ? currentTimeline(this.session.document) : null;
+        const first = timeline?.tracks[0];
+        if (this.session && first) {
+          this.session.pasteClips(this.app.player.currentTime.asNumber(), first.id);
+          this.onEdited();
+        }
+      },
+      undo: () => {
+        this.session?.undo();
+        this.onEdited();
+      },
+      redo: () => {
+        this.session?.redo();
+        this.onEdited();
+      },
+      addMarker: () => this.toolbarActions().addMarker(),
+      zoomIn: () => {
+        this.view?.setZoom((this.view.zoom() ?? 80) * 1.25);
+        this.zoomControl?.refresh();
+        this.syncSize();
+      },
+      zoomOut: () => {
+        this.view?.setZoom((this.view.zoom() ?? 80) / 1.25);
+        this.zoomControl?.refresh();
+        this.syncSize();
+      },
+      zoomFit: () => {
+        this.zoomControl?.zoomFit();
+        this.syncSize();
+      },
+      toggleEnabled: () => {
+        if (!this.session) return;
+        for (const id of this.session.selection.selectedClipIds) this.session.toggleClipEnabled(id);
+        this.onEdited();
+      },
+      saveProject: () => {
+        void this.app.saveProject();
+      },
+    };
+  }
+
+  /** rAF loop: playhead + viewport window stay in sync with the player. */
+  private startPlayheadLoop(): void {
+    const tick = (): void => {
+      this.playheadFrame = requestAnimationFrame(tick);
+      if (!this.view || !this.playhead) return;
+      const seconds = this.app.player.currentTime.asNumber();
+      const x = this.view.timeToX(seconds);
+      this.playhead.setPosition(x, seconds);
+      if (x < 0 || x > this.view.viewport().width) this.playhead.hide();
+      else this.playhead.show();
+    };
+    this.playheadFrame = requestAnimationFrame(tick);
+  }
+
+  /** Remembers the zoom in user settings. */
+  private saveZoomSetting(): void {
+    // Zoom is transient per open project; nothing durable to store yet.
+  }
+
+  /** Opens a marker editor (double-click on the ruler markers). */
+  openMarker(marker: MarkerData): void {
+    if (!this.session) return;
+    openMarkerEditor(marker, (op) => {
+      this.run(op);
     });
   }
 
-  private beginDrag(event: PointerEvent, clip: DocumentClip, element: HTMLElement): void {
-    this.ctx.history.push(this.ctx.session.document, this.ctx.session.documentSettings());
-    const target = event.target;
-    const mode =
-      target instanceof HTMLElement && target.classList.contains('trim-left')
-        ? 'trim-left'
-        : target instanceof HTMLElement && target.classList.contains('trim-right')
-          ? 'trim-right'
-          : 'move';
-    this.drag = {
-      mode,
-      clip,
-      element,
-      startX: event.clientX,
-      clipStart: clip.start,
-      clipDuration: clip.duration,
-      sourceStart: clip.sourceStart,
-    };
-    element.setPointerCapture(event.pointerId);
-  }
-
-  /** One mutation landed: history, dirty, engine, preview, autosave. */
-  private commitChange(): void {
-    this.ctx.session.rebuild();
-    this.ctx.session.dirty = true;
-    this.refresh();
-    this.ctx.requestRender();
-    this.ctx.requestAutosave();
+  /** Duplicate for keyboard/toolbar reuse. */
+  duplicateSelection(): void {
+    if (!this.session) return;
+    this.session.duplicateClips([...this.session.selection.selectedClipIds]);
+    this.onEdited();
   }
 }
 
-/** A clip drag in flight. */
-interface DragState {
-  mode: 'move' | 'trim-left' | 'trim-right';
-  clip: DocumentClip;
-  element: HTMLElement;
-  startX: number;
-  clipStart: number;
-  clipDuration: number;
-  sourceStart: number;
+/** Grabs one frame of a stored video blob at a time, for clip thumbnails. */
+async function grabVideoFrame(blob: Blob, timeSeconds: number): Promise<HTMLCanvasElement | null> {
+  if (typeof URL === 'undefined' || typeof URL.createObjectURL !== 'function') return null;
+  const url = URL.createObjectURL(blob);
+  try {
+    const video = document.createElement('video');
+    video.muted = true;
+    video.preload = 'auto';
+    video.src = url;
+    await new Promise<void>((resolve, reject) => {
+      video.onloadeddata = () => resolve();
+      video.onerror = () => reject(new Error('video load failed'));
+    });
+    video.currentTime = Math.max(0, Math.min(timeSeconds, Math.max(0, (video.duration || 1) - 0.05)));
+    await new Promise<void>((resolve) => {
+      video.onseeked = () => resolve();
+      window.setTimeout(resolve, 500);
+    });
+    const canvas = document.createElement('canvas');
+    canvas.width = 96;
+    canvas.height = 54;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return null;
+    ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+    return canvas;
+  } catch {
+    return null;
+  } finally {
+    URL.revokeObjectURL(url);
+  }
 }
 
-/** `0:05` style short time for ruler labels. */
-function formatSeconds(seconds: number): string {
-  const minutes = Math.floor(seconds / 60);
-  const rest = seconds % 60;
-  return minutes > 0 ? `${minutes}:${String(rest).padStart(2, '0')}` : `${rest}s`;
-}
+/** Loads ops used by the menu. */
+export { DeleteClipOperation, DeleteClipsOperation, DuplicateClipOperation, SetTrackPropertyOperation };

@@ -15,7 +15,8 @@ import { createProjectDocument } from './model/document.ts';
 import { MediaPool } from './media/media-pool.ts';
 import { PreviewPlayer } from './player/player.ts';
 import type { RenderContext2D, RenderTarget } from './render/types.ts';
-import { EditorSession } from './session/editor-session.ts';
+import { EditSession } from './session/edit-session.ts';
+import { generateWaveformMultiRes, WAVEFORM_RESOLUTIONS } from './media/waveform-generator.ts';
 import { History } from './session/history.ts';
 import { MediaStore } from './storage/media-store.ts';
 import { ProjectStore } from './storage/project-store.ts';
@@ -58,7 +59,8 @@ class CanvasRef implements RenderTarget {
 
 /** The editor application. */
 class EditorApp implements AppContext {
-  session = new EditorSession();
+  session = new EditSession();
+  editSession: EditSession = this.session;
   player: PreviewPlayer;
   pool = new MediaPool();
   mediaStore: MediaStore;
@@ -101,6 +103,10 @@ class EditorApp implements AppContext {
     document.body.appendChild(toastStack);
     this.notifications = new Notifications(toastStack);
     this.notifications.setEnabled(this.settings.showTooltips);
+    this.session.onError = (message, error) => {
+      console.error(message, error);
+      this.notifications.error('Operación inválida', message);
+    };
 
     // Storage backends (real IndexedDB + OPFS when available).
     const mediaBackend = await openKeyValue('ConcatMediaDB', ['files']);
@@ -140,10 +146,8 @@ class EditorApp implements AppContext {
     // App-level events.
     document.addEventListener('open-import', () => this.mediaPanel?.openPicker());
     document.addEventListener('session-reset', () => {
-      this.session.document = createProjectDocument();
       this.session.name = 'Untitled';
-      this.session.rebuild();
-      this.session.dirty = false;
+      this.session.loadDocument(createProjectDocument());
       this.projectId = null;
       this.selectedClipId = null;
       this.refreshAll();
@@ -190,6 +194,7 @@ class EditorApp implements AppContext {
           await this.mediaStore.importFile(file, info, id, file.name);
         }
         this.session.addMediaItem(this.toMediaItem(asset.id, asset.name, asset));
+        void this.generateWaveforms(file, asset.id);
         this.notifications.success('Medio importado', asset.name);
       } catch (error) {
         this.notifications.error('Error al importar', `${file.name}: ${describe(error)}`);
@@ -221,10 +226,8 @@ class EditorApp implements AppContext {
       return;
     }
     this.history.clear();
-    this.session.document = loaded.document;
     this.session.name = loaded.name;
-    this.session.rebuild();
-    this.session.dirty = false;
+    this.session.loadDocument(loaded.document);
     this.projectId = id;
     this.selectedClipId = null;
     this.refreshAll();
@@ -233,12 +236,22 @@ class EditorApp implements AppContext {
   }
 
   addMediaToTimeline(mediaId: string): void {
+    const session = this.session;
+    const timeline = session.timeline;
+    const target =
+      timeline.tracks.find((track) => track.extra['kind'] === 'video') ??
+      timeline.tracks[0];
+    if (!target) return;
     this.history.push(this.session.document, this.session.documentSettings());
-    const clip = this.session.addClipAt(mediaId, this.player.currentTime);
+    const clip = session.makeClip(mediaId, target.id, this.player.currentTime.asNumber());
+    session.insertClip(clip, 'insert');
+    session.selection.selectClips([clip.id], false, session.document);
     this.selectedClipId = clip.id;
     this.refreshAll();
     this.requestRender();
     this.requestAutosave();
+    document.dispatchEvent(new CustomEvent('selection-changed'));
+    document.dispatchEvent(new CustomEvent('timeline-changed'));
   }
 
   selectClip(docClipId: string | null): void {
@@ -262,6 +275,24 @@ class EditorApp implements AppContext {
 
   saveSettings(): void {
     persistSettings(this.settings);
+  }
+
+  /** Generates + caches the audio waveforms of a fresh import. */
+  private async generateWaveforms(file: File | Blob, mediaId: string): Promise<void> {
+    try {
+      let audioContext: AudioContext | null = null;
+      try {
+        audioContext = new AudioContext();
+      } catch {
+        audioContext = null;
+      }
+      if (!audioContext) return;
+      const buffer = await audioContext.decodeAudioData(await file.arrayBuffer());
+      await generateWaveformMultiRes(buffer, [...WAVEFORM_RESOLUTIONS], mediaId);
+      void audioContext.close();
+    } catch (error) {
+      console.warn('Waveform no disponible para', mediaId, error);
+    }
   }
 
   // -- internals -----------------------------------------------------------
@@ -327,37 +358,22 @@ class EditorApp implements AppContext {
       return;
     }
     this.history.push(this.session.document, this.session.documentSettings());
-    const headDuration = at - clip.start;
-    const tailDuration = clip.duration - headDuration;
-    if (headDuration <= 0 || tailDuration <= 0) return;
-    const tail = structuredClone(clip);
-    tail.id = nextClipId(timeline.clips.map((item) => item.id));
-    tail.start = at;
-    tail.duration = tailDuration;
-    tail.sourceStart = clip.sourceStart + headDuration * clip.speed;
-    clip.duration = headDuration;
-    timeline.clips.push(tail);
-    this.session.rebuild();
-    this.session.dirty = true;
-    this.refreshAll();
-    this.requestRender();
-    this.requestAutosave();
+    if (this.session.splitClip(clip.id, at)) {
+      this.refreshAll();
+      this.requestRender();
+      this.requestAutosave();
+      document.dispatchEvent(new CustomEvent('timeline-changed'));
+    }
   }
 
   /** Ctrl+D: duplicates the selection after the original. */
   duplicateSelection(): void {
     const id = this.selectedClipId;
     const timeline = this.session.timeline;
-    const clip = timeline.clips.find((item) => item.id === id);
-    if (!clip) return;
+    const clip = id === null ? undefined : timeline.clips.find((item) => item.id === id);
+    if (!clip || id === null) return;
     this.history.push(this.session.document, this.session.documentSettings());
-    const copy = structuredClone(clip);
-    copy.id = nextClipId(timeline.clips.map((item) => item.id));
-    copy.start = clip.start + clip.duration;
-    timeline.clips.push(copy);
-    this.selectedClipId = copy.id;
-    this.session.rebuild();
-    this.session.dirty = true;
+    this.session.duplicateClips([id]);
     this.refreshAll();
     this.requestRender();
     this.requestAutosave();

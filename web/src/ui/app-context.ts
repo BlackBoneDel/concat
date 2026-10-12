@@ -8,6 +8,7 @@
 
 import type { MediaPool } from '../media/media-pool.ts';
 import type { PreviewPlayer } from '../player/player.ts';
+import type { EditSession } from '../session/edit-session.ts';
 import type { EditorSession } from '../session/editor-session.ts';
 import type { History } from '../session/history.ts';
 import type { MediaStore } from '../storage/media-store.ts';
@@ -20,6 +21,9 @@ import type { KeyboardShortcuts } from './shortcuts.ts';
 /** What the shell wires together. */
 export interface AppContext {
   session: EditorSession;
+  /** The Fase-3 editing session (history/selection/clipboard); optional so
+   * Fase-2 contexts keep compiling. */
+  editSession?: EditSession;
   player: PreviewPlayer;
   pool: MediaPool;
   mediaStore: MediaStore;
