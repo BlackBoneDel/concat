@@ -6,11 +6,19 @@
  * bar. Scrubbing maps pointer position to timeline time and seeks the
  * player; the timecode display offers an editable `HH:MM:SS:FF` field that
  * accepts a typed jump.
+ *
+ * Fase 7 hook: a centred SVG transport (inicio, fotograma −1, play/pausa,
+ * fotograma +1, final, detener, bucle) between the timecode and the
+ * volume/quality controls; the volume icon mutes and reflects the level.
+ * `syncTime` also broadcasts `playhead-changed` so panels (the keyframe
+ * toggles of the inspector) can follow the playhead without polling.
  */
 
 import { Rational } from '../core/rational.ts';
 import type { AppContext } from './app-context.ts';
 import { formatTimecode, parseTimecode, isDropFrameRate } from '../player/timecode.ts';
+import { iconButton, setButtonIcon, setPressed, type IconName } from './components/icons.ts';
+import { PLAYHEAD_EVENT } from './ui-events.ts';
 
 /** The centre-top panel of the shell. */
 export class PreviewPanel {
@@ -23,6 +31,9 @@ export class PreviewPanel {
   private readonly scrubFill: HTMLElement;
   private readonly volume: HTMLInputElement;
   private readonly quality: HTMLSelectElement;
+  private readonly loopButton: HTMLButtonElement;
+  private readonly muteButton: HTMLButtonElement;
+  private volumeBeforeMute = 1;
   private rafSync = 0;
 
   /**
@@ -53,19 +64,32 @@ export class PreviewPanel {
     this.root.appendChild(this.scrub);
     this.wireScrub();
 
-    // -- transport
+    // -- transport: [timecode] [centred buttons] [volume · quality]
     const transport = document.createElement('div');
-    transport.className = 'transport';
+    transport.className = 'transport transport-hud';
+    transport.setAttribute('role', 'toolbar');
+    transport.setAttribute('aria-label', 'Transporte');
 
     const left = document.createElement('div');
-    left.className = 'transport-group';
-    left.appendChild(this.button('⏮', 'Inicio (Home)', () => this.goStart()));
-    left.appendChild(this.button('◀|', 'Fotograma anterior (←)', () => this.ctx.player.stepBackward()));
-    this.playButton = this.button('▶', 'Reproducir / Pausar (Espacio)', () => this.togglePlay());
-    this.playButton.classList.add('transport-play');
-    left.appendChild(this.playButton);
-    left.appendChild(this.button('|▶', 'Fotograma siguiente (→)', () => this.ctx.player.stepForward()));
-    left.appendChild(this.button('⏹', 'Detener', () => this.ctx.player.stop()));
+    left.className = 'transport-group transport-left';
+    const center = document.createElement('div');
+    center.className = 'transport-group transport-center';
+    center.append(
+      this.button('skipBack', 'Ir al inicio', 'Inicio', () => this.goStart()),
+      this.button('stepBack', 'Fotograma anterior', '←', () => this.ctx.player.stepBackward()),
+    );
+    this.playButton = this.button('play', 'Reproducir', 'Espacio', () => this.togglePlay());
+    this.playButton.classList.add('transport-play', 'is-lg');
+    center.append(
+      this.playButton,
+      this.button('stepForward', 'Fotograma siguiente', '→', () => this.ctx.player.stepForward()),
+      this.button('skipForward', 'Ir al final', 'Fin', () => this.goEnd()),
+      this.divider(),
+      this.button('stop', 'Detener', undefined, () => this.ctx.player.stop()),
+    );
+    this.loopButton = this.button('loop', 'Reproducción en bucle', undefined, () => this.toggleLoop());
+    setPressed(this.loopButton, false);
+    center.appendChild(this.loopButton);
 
     this.timecodeInput = document.createElement('input');
     this.timecodeInput.className = 'timecode-input';
@@ -83,15 +107,14 @@ export class PreviewPanel {
       }
     });
     left.appendChild(this.timecodeInput);
-    transport.appendChild(left);
+    transport.append(left, center);
 
     const right = document.createElement('div');
-    right.className = 'transport-group';
+    right.className = 'transport-group transport-right';
 
-    const volumeLabel = document.createElement('span');
-    volumeLabel.className = 'transport-label';
-    volumeLabel.textContent = '🔊';
-    right.appendChild(volumeLabel);
+    this.muteButton = this.button('volumeOn', 'Silenciar la previsualización', undefined, () => this.toggleMute());
+    this.muteButton.classList.add('transport-mute');
+    right.appendChild(this.muteButton);
     this.volume = document.createElement('input');
     this.volume.type = 'range';
     this.volume.min = '0';
@@ -99,9 +122,11 @@ export class PreviewPanel {
     this.volume.step = '0.01';
     this.volume.value = String(this.ctx.settings.volume);
     this.volume.className = 'transport-volume';
+    this.volume.setAttribute('aria-label', 'Volumen de la previsualización');
     this.volume.addEventListener('input', () => {
       this.ctx.settings.volume = Number(this.volume.value);
       this.ctx.saveSettings();
+      this.syncVolumeIcon();
     });
     right.appendChild(this.volume);
 
@@ -132,9 +157,13 @@ export class PreviewPanel {
     // -- player events
     this.ctx.player.onTimeUpdate = (time) => this.syncTime(time);
     this.ctx.player.onStateChanged = (state) => {
-      this.playButton.textContent = state === 'playing' ? '⏸' : '▶';
-      this.playButton.title = state === 'playing' ? 'Pausar (Espacio)' : 'Reproducir (Espacio)';
+      const playing = state === 'playing';
+      setButtonIcon(this.playButton, playing ? 'pause' : 'play');
+      this.playButton.title = playing ? 'Pausar (Espacio)' : 'Reproducir (Espacio)';
+      this.playButton.setAttribute('aria-label', playing ? 'Pausar' : 'Reproducir');
     };
+    this.quality.setAttribute('aria-label', 'Calidad de previsualización');
+    this.syncVolumeIcon();
     this.sizeCanvas();
     if (typeof ResizeObserver !== 'undefined') {
       new ResizeObserver(() => this.sizeCanvas()).observe(stage);
@@ -155,6 +184,8 @@ export class PreviewPanel {
     const duration = this.ctx.session.duration();
     const fraction = duration.asNumber() > 0 ? time.asNumber() / duration.asNumber() : 0;
     this.scrubFill.style.width = `${Math.min(100, Math.max(0, fraction * 100))}%`;
+    // Fase 7 hook: let panels follow the playhead (keyframe toggles).
+    document.dispatchEvent(new CustomEvent<number>(PLAYHEAD_EVENT, { detail: time.asNumber() }));
   }
 
   // -- internals -----------------------------------------------------------
@@ -168,14 +199,64 @@ export class PreviewPanel {
     this.ctx.player.seekTo(Rational.ZERO);
   }
 
-  private button(label: string, title: string, onClick: () => void): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'btn btn-icon';
-    button.textContent = label;
-    button.title = title;
-    button.addEventListener('click', onClick);
-    return button;
+  private goEnd(): void {
+    this.ctx.player.pause();
+    this.ctx.player.seekTo(this.ctx.session.duration());
+  }
+
+  /** Loops the I/O range when marked, otherwise the whole edit. */
+  private toggleLoop(): void {
+    const player = this.ctx.player;
+    if (player.loop) {
+      player.clearLoop();
+      setPressed(this.loopButton, false);
+      return;
+    }
+    const edit = this.ctx.editSession;
+    const marked = edit && (edit.inPoint !== null || edit.outPoint !== null) ? edit.exportRange() : null;
+    const end = this.ctx.session.duration();
+    if (!marked && end.isZero()) {
+      this.ctx.notifications.info('Nada que repetir', 'Añade clips o marca entrada/salida (I / O).');
+      return;
+    }
+    const range = marked ?? { start: Rational.ZERO, end };
+    player.setLoop(range.start, range.end);
+    setPressed(this.loopButton, true);
+    this.loopButton.title = marked ? 'Bucle de entrada/salida activo' : 'Bucle de toda la línea de tiempo activo';
+  }
+
+  /** Mutes/unmutes the preview, remembering the level. */
+  private toggleMute(): void {
+    const current = Number(this.volume.value);
+    if (current > 0) {
+      this.volumeBeforeMute = current;
+      this.volume.value = '0';
+    } else {
+      this.volume.value = String(this.volumeBeforeMute > 0 ? this.volumeBeforeMute : 1);
+    }
+    this.ctx.settings.volume = Number(this.volume.value);
+    this.ctx.saveSettings();
+    this.syncVolumeIcon();
+  }
+
+  private syncVolumeIcon(): void {
+    const muted = Number(this.volume.value) <= 0;
+    setButtonIcon(this.muteButton, muted ? 'volumeMute' : 'volumeOn');
+    setPressed(this.muteButton, muted);
+    const label = muted ? 'Activar el sonido de la previsualización' : 'Silenciar la previsualización';
+    this.muteButton.title = label;
+    this.muteButton.setAttribute('aria-label', label);
+  }
+
+  private button(glyph: IconName, label: string, shortcut: string | undefined, onClick: () => void): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, shortcut, className: 'transport-btn', onClick: () => onClick() });
+  }
+
+  private divider(): HTMLElement {
+    const divider = document.createElement('span');
+    divider.className = 'transport-divider';
+    divider.setAttribute('aria-hidden', 'true');
+    return divider;
   }
 
   /** Canvas backing store = project frame × quality scale, aspect kept. */

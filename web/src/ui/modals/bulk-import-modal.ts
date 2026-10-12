@@ -7,6 +7,7 @@
  * progress bar, a live log and a cancel button.
  */
 
+import { icon } from '../components/icons.ts';
 import { BulkImporter, type BulkImportEvent, type ImportGrouping, type ImportOne } from '../../media/import/bulk-importer.ts';
 import type { FolderScanner, ScannedFile } from '../../media/relink/folder-scanner.ts';
 import { Dialog, progressBar } from './dialog.ts';
@@ -119,7 +120,8 @@ export function openBulkImportModal<T>(options: BulkImportModalOptions<T>): Prom
   const logLine = (text: string, kind: 'ok' | 'error'): void => {
     const li = document.createElement('li');
     li.className = `bulk-log-${kind}`;
-    li.textContent = text;
+    // Fase 7 hook: SVG status glyph instead of ✓/✗.
+    li.append(icon(kind === 'ok' ? 'check' : 'close', { size: 13, className: `inline-icon log-icon-${kind}`, label: kind === 'ok' ? 'Importado' : 'Error' }), ` ${text}`);
     log.prepend(li);
     while (log.children.length > 200) log.lastElementChild?.remove();
   };
@@ -142,8 +144,8 @@ export function openBulkImportModal<T>(options: BulkImportModalOptions<T>): Prom
     for await (const event of importer.run(files.map((f) => ({ file: f.file, path: f.path })))) {
       last = event;
       if (event.type === 'progress') bar.set(event.overall, `${event.completed}/${event.total}`);
-      else if (event.type === 'complete') logLine(`✓ ${event.name} → ${event.group}`, 'ok');
-      else if (event.type === 'error') logLine(`✗ ${event.name}: ${event.error}`, 'error');
+      else if (event.type === 'complete') logLine(`${event.name} → ${event.group}`, 'ok');
+      else if (event.type === 'error') logLine(`${event.name}: ${event.error}`, 'error');
     }
     if (last?.type === 'done') {
       summary.textContent = `${last.completed} importado(s), ${last.failed} con error${last.cancelled ? ' (cancelado)' : ''}.`;

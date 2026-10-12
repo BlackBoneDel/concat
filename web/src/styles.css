@@ -1355,15 +1355,22 @@ body {
   list-style: none;
   user-select: none;
 }
+/* Fase 7: a stroked CSS chevron (same 2px weight as the SVG icon set)
+ * instead of the "▸" glyph. */
 .fx-group > summary.inspector-group-title::before {
-  content: '▸';
+  content: '';
   display: inline-block;
-  width: 1em;
-  color: var(--text-muted);
+  width: 6px;
+  height: 6px;
+  margin: 0 8px 2px 2px;
+  border-right: 2px solid var(--text-muted);
+  border-bottom: 2px solid var(--text-muted);
+  border-radius: 1px;
+  transform: rotate(-45deg);
   transition: transform 0.12s ease;
 }
 .fx-group[open] > summary.inspector-group-title::before {
-  transform: rotate(90deg);
+  transform: rotate(45deg);
 }
 .fx-group > summary:focus-visible {
   outline: 2px solid var(--accent);
@@ -2053,4 +2060,242 @@ body {
   .shortcuts-groups {
     columns: 1;
   }
+}
+
+/* ---------------------------------------------------------------------------
+ * Fase 7: HUD de iconos SVG (ui/components/icons.ts).
+ * The HUD's semantic names alias the three themes' variables (set on :root by
+ * ThemeManager), so every icon follows dark/light/cyberpunk automatically.
+ * ------------------------------------------------------------------------- */
+
+:root {
+  --text-primary: var(--text);
+  --text-secondary: var(--text-muted);
+  --accent-color: var(--accent);
+  --accent-color-transparent: color-mix(in srgb, var(--accent) 16%, transparent);
+  --bg-hover: color-mix(in srgb, var(--text) 9%, transparent);
+  /* QA Fase 7: names the Fase 3 timeline CSS used but no theme defined —
+     the marquee, active tool and pressed track toggles rendered colourless. */
+  --accent-primary: var(--accent);
+  --accent-hover: var(--accent-strong);
+  --bg-primary: var(--bg);
+  --bg-secondary: var(--bg-panel);
+  --bg-tertiary: var(--bg-elevated);
+  --text-tertiary: var(--text-muted);
+  --error: var(--danger);
+  --radius-sm: 4px;
+  --radius-md: var(--radius);
+  --spacing-md: 12px;
+  --shadow-md: 0 4px 14px var(--shadow);
+}
+
+.concat-icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  flex: 0 0 auto;
+  border-radius: 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  color: var(--text-secondary);
+  font: inherit;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+.concat-icon-btn:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+.concat-icon-btn.active {
+  background: var(--accent-color-transparent);
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+.concat-icon-btn:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+.concat-icon-btn:focus-visible {
+  outline: 2px solid var(--accent-color);
+  outline-offset: 1px;
+}
+.concat-icon-btn.has-text {
+  width: auto;
+  padding: 0 10px 0 8px;
+}
+.concat-icon-btn-text {
+  font-size: 12px;
+  font-weight: 600;
+}
+.concat-icon {
+  pointer-events: none; /* Prevenir bugs de click target */
+  flex: 0 0 auto;
+  display: block;
+}
+
+/* Compact variants. */
+.concat-icon-btn.is-sm {
+  width: 24px;
+  height: 24px;
+  border-radius: 5px;
+}
+.concat-icon-btn.is-lg {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+}
+
+/* Track headers: inactive toggles dim, active ones take the accent.
+   (Higher specificity than the Fase 3 text-button rules they replace.) */
+.concat-icon-btn.tl-track-btn,
+.concat-icon-btn.tl-tool-btn,
+.concat-icon-btn.tl-zoom-btn {
+  min-width: 0;
+  padding: 0;
+  font-size: inherit;
+  background: transparent;
+  border-color: transparent;
+}
+.concat-icon-btn.tl-tool-btn {
+  width: 30px;
+  height: 30px;
+}
+.concat-icon-btn.tl-track-btn {
+  width: 22px;
+  height: 22px;
+  border-radius: 4px;
+}
+.concat-icon-btn.tl-tool-btn[aria-pressed='true'],
+.concat-icon-btn.tl-track-btn[aria-pressed='true'] {
+  background: var(--accent-color-transparent);
+  color: var(--accent-color);
+  border-color: var(--accent-color);
+}
+.tl-track-buttons .concat-icon-btn.tl-track-btn[aria-pressed='false'] {
+  opacity: 0.55;
+}
+.tl-track-buttons .concat-icon-btn.tl-track-btn[aria-pressed='false']:hover {
+  opacity: 1;
+}
+/* Visible is the normal state: the eye stays neutral; hidden is flagged. */
+.tl-track-buttons .concat-icon-btn.tl-toggle-visible[aria-pressed='true'] {
+  background: transparent;
+  border-color: transparent;
+  color: var(--text-secondary);
+}
+.tl-track-buttons .concat-icon-btn.tl-toggle-visible[aria-pressed='false'] {
+  opacity: 1;
+  color: var(--warning);
+}
+.tl-track-buttons .concat-icon-btn.tl-toggle-mute[aria-pressed='true'] {
+  color: var(--danger);
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 16%, transparent);
+}
+.tl-track-buttons .concat-icon-btn.tl-toggle-solo[aria-pressed='true'] {
+  color: var(--warning);
+  border-color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 16%, transparent);
+}
+
+/* Preview transport: timecode | centred buttons | volume & quality. */
+.transport.transport-hud {
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+}
+.transport-hud .transport-left {
+  justify-self: start;
+}
+.transport-hud .transport-center {
+  justify-self: center;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 3px 6px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+.transport-hud .transport-right {
+  justify-self: end;
+}
+.transport-hud .transport-play {
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent-color);
+  color: var(--accent-text);
+}
+.transport-hud .transport-play:hover:not(:disabled) {
+  background: var(--accent-strong);
+  color: var(--accent-text);
+}
+.transport-hud .transport-divider {
+  width: 1px;
+  height: 18px;
+  margin: 0 2px;
+  background: var(--border);
+}
+
+/* Inspector keyframes. */
+.inspector-group-title .concat-icon {
+  display: inline-block;
+  vertical-align: -2px;
+  margin-left: 6px;
+  color: var(--accent-color);
+}
+.keyframe-toggle.has-key {
+  color: var(--accent-color);
+}
+.keyframe-row .keyframe-diamond {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--accent-color);
+}
+.keyframe-row .keyframe-diamond .concat-icon {
+  width: 12px;
+  height: 12px;
+}
+
+/* Header. */
+.header-actions .concat-icon-btn.header-export {
+  background: var(--accent-color);
+  color: var(--accent-text);
+  border-color: transparent;
+}
+.header-actions .concat-icon-btn.header-export:hover:not(:disabled) {
+  background: var(--accent-strong);
+  color: var(--accent-text);
+}
+
+/* Inline icons inside prose (hints, logs). */
+.inline-icon {
+  display: inline-block;
+  vertical-align: -3px;
+  margin: 0 2px;
+}
+.log-icon-ok {
+  color: var(--success);
+}
+.log-icon-error {
+  color: var(--danger);
+}
+.media-thumb-icon {
+  color: var(--text-secondary);
+}
+.header-menu {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+.header-menu .concat-icon {
+  color: var(--text-secondary);
 }

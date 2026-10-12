@@ -6,6 +6,7 @@
  * time/value and the Bézier curve it is approached through.
  */
 
+import { icon } from '../components/icons.ts';
 import {
   KEYFRAME_VALUE_RANGES,
   MoveKeyframeValueOperation,
@@ -40,7 +41,14 @@ export function keyframeCurveSection(host: KeyframeCurveHost, clip: DocumentClip
     ? clip.keys.find((item) => item.property === selected.property && keyframeId(item.property, item.at) === selected.keyframeId)
     : undefined;
   if (!selected || !key) {
-    hint.textContent = 'Abre los keyframes del clip con ⏷ en el timeline y selecciona un ◆ para editar su curva. Doble clic en la sub-pista añade un keyframe.';
+    // Fase 7 hook: inline SVG glyphs instead of text symbols.
+    hint.append(
+      'Abre los keyframes del clip con ',
+      icon('chevronDown', { size: 14, className: 'inline-icon', label: 'el botón de keyframes' }),
+      ' en el timeline y selecciona un ',
+      icon('keyframeFilled', { size: 12, className: 'inline-icon', label: 'keyframe' }),
+      ' para editar su curva. Doble clic en la sub-pista añade un keyframe.',
+    );
     return group('Curva del keyframe', false, [hint], 'fx-keyframe-hint');
   }
   const [lo, hi] = KEYFRAME_VALUE_RANGES[key.property];

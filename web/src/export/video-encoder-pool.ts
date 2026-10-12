@@ -16,7 +16,7 @@
  */
 
 import type { ExportFrameLike } from './offline-renderer.ts';
-import { ExportError, toExportError, type EncodedPacket, type ExportConfig, type ExportVideoCodec } from './types.ts';
+import { ExportError, frameRateOf, toExportError, type EncodedPacket, type ExportConfig, type ExportVideoCodec } from './types.ts';
 
 /** What the pool needs from a `VideoEncoder` (tests pass doubles). */
 export interface VideoEncoderLike {
@@ -264,6 +264,12 @@ export class VideoEncoderPool {
    * @param options packet sink, factories and signal.
    */
   constructor(config: ExportConfig, options: VideoEncoderPoolOptions) {
+    // Fase 7 hook (QA): defence in depth — a 0×0 frame or a 0/x, x/0 rate
+    // must never reach `VideoEncoder.configure` (division by zero in the
+    // level tables, a native-side exception or a hung encoder).
+    if (!(config.width >= 2 && config.height >= 2) || frameRateOf(config.frameRate) === null) {
+      throw new ExportError('INVALID_RANGE', 'Tamaño o frecuencia de fotogramas inválidos para el codificador.');
+    }
     this.config = config;
     this.options = options;
     this.maxQueue = Math.max(1, options.maxQueue ?? 4);

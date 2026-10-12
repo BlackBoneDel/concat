@@ -644,8 +644,12 @@ export class SplitClipOperation implements EditOperation {
   apply(doc: ProjectDocument): ProjectDocument {
     const clip = requireClip(doc, this.clipId);
     const at = this.splitTime.asNumber();
-    if (at <= clip.start + 1e-9 || at >= clip.start + clip.duration - 1e-9) {
+    if (!Number.isFinite(at) || at <= clip.start + 1e-9 || at >= clip.start + clip.duration - 1e-9) {
       throw new EditError('El punto de corte debe estar dentro del clip');
+    }
+    // Fase 7 hook (QA): no ghost slivers — both halves must last a frame.
+    if (at - clip.start < MIN_CLIP_DURATION - 1e-9 || clip.start + clip.duration - at < MIN_CLIP_DURATION - 1e-9) {
+      throw new EditError('El corte dejaría un fragmento de menos de un fotograma');
     }
     const next = cloneDocument(doc);
     const timeline = currentTimeline(next);
@@ -1485,6 +1489,20 @@ export class AddTransitionOperation implements EditOperation {
   }
 }
 
+/**
+ * Fase 7: the hard ceiling of a transition on the cut into `clipB`.
+ * @param doc the document.
+ * @param clipB the clip the transition flows into.
+ * @returns seconds: the shorter of the two clips around the cut (the clip
+ *   alone when it has no contiguous neighbour).
+ */
+export function transitionLimit(doc: ProjectDocument, clipB: DocumentClip): number {
+  const prev = currentTimeline(doc).clips.find(
+    (candidate) => candidate.trackId === clipB.trackId && candidate.id !== clipB.id && Math.abs(clipEnd(candidate) - clipB.start) <= 1e-6,
+  );
+  return prev ? Math.min(prev.duration, clipB.duration) : clipB.duration;
+}
+
 /** Removes the transition on a cut. */
 export class RemoveTransitionOperation implements EditOperation {
   readonly name = 'RemoveTransition';
@@ -1570,8 +1588,14 @@ export class SetTransitionPropertyOperation implements EditOperation {
     const next = cloneDocument(doc);
     const transition = requireClip(next, clipBId).transitionIn!;
     if (this.property === 'duration') {
-      if (typeof this.newValue !== 'number' || this.newValue <= 0) {
+      if (typeof this.newValue !== 'number' || !Number.isFinite(this.newValue) || this.newValue <= 0) {
         throw new EditError('La duración debe ser un número positivo');
+      }
+      // Fase 7 hook (QA): a transition can never outlast either clip around
+      // the cut (AddTransitionOperation already proposes at most half) — so
+      // a 1-frame clip can never carry a 1 s dissolve.
+      if (this.newValue > transitionLimit(doc, clip) + 1e-9) {
+        throw new EditError('La transición no puede durar más que el clip más corto');
       }
       transition.duration = this.newValue;
     } else if (this.property === 'kind') {

@@ -14,6 +14,7 @@
 
 import { Rational } from '../core/rational.ts';
 import { renderFrame, type RenderTarget } from '../render/index.ts';
+import { MISSING_MEDIA_COLORS } from '../render/compositor.ts';
 import type { EditorSession } from '../session/editor-session.ts';
 import type { MediaPool } from '../media/media-pool.ts';
 import { AudioMixer, type AudioGraphContext, type BufferLike } from './audio-mixer.ts';
@@ -73,6 +74,11 @@ export class PreviewPlayer {
   onTimeUpdate: ((time: Rational) => void) | null = null;
   /** Fired when play/pause/stop changes the state. */
   onStateChanged: ((state: PlayerState) => void) | null = null;
+  /**
+   * Fase 7: fired once per failing media id (`mediaId` set) and for any
+   * other render/audio failure (`mediaId` null). The loop never stops.
+   */
+  onRenderError: ((error: unknown, mediaId: string | null) => void) | null = null;
 
   private readonly canvas: RenderTarget;
   private readonly session: EditorSession;
@@ -88,6 +94,11 @@ export class PreviewPlayer {
   private lastDriftCheck = 0;
   private audioAnchor: { contextTime: number; timelineTime: number } | null = null;
   private destroyed = false;
+  /** Fase 7: renders are serialized — one painting, at most one queued. */
+  private renderChain: Promise<void> = Promise.resolve();
+  private pendingRenders = 0;
+  /** Fase 7: media ids already reported as failing. */
+  private readonly failedMedia = new Set<string>();
 
   /**
    * @param options the surfaces and data to play.
@@ -157,6 +168,10 @@ export class PreviewPlayer {
           timelineTime: this.position.asNumber(),
         };
       }
+    }).catch((error: unknown) => {
+      // Fase 7 hook (QA): a dead audio buffer must not become an unhandled
+      // rejection; the picture keeps playing silent.
+      this.onRenderError?.(error, null);
     });
     this.rafHandle = raf(this.loopFrame);
   }
@@ -246,9 +261,67 @@ export class PreviewPlayer {
     this.loopRegion = null;
   }
 
-  /** Paints the current frame once — scrubbing, seeks, edits. */
-  async renderOnce(): Promise<void> {
-    await renderFrame(this.session.engine, this.position, this.canvas, this.mediaPool);
+  /**
+   * Paints the current frame once — scrubbing, seeks, edits.
+   *
+   * Fase 7 hook (QA): never rejects and never overlaps. A slow decode used
+   * to let the next rAF tick start a second composite on the same canvas
+   * (interleaved draws); now one render paints while at most one more waits
+   * and reads the *latest* position when it starts. A failing clip draws a
+   * red "Media Missing" card; any other failure paints an error frame.
+   * @returns resolves once the latest requested frame is on the canvas.
+   */
+  renderOnce(): Promise<void> {
+    if (this.pendingRenders >= 2) return this.renderChain;
+    this.pendingRenders += 1;
+    this.renderChain = this.renderChain
+      .then(() => this.paint())
+      .finally(() => {
+        this.pendingRenders -= 1;
+      });
+    return this.renderChain;
+  }
+
+  /** Forgets reported media failures (after a relink). */
+  clearMediaErrors(): void {
+    this.failedMedia.clear();
+  }
+
+  /** One composite, errors contained. */
+  private async paint(): Promise<void> {
+    if (this.destroyed) return;
+    try {
+      await renderFrame(this.session.engine, this.position, this.canvas, this.mediaPool, {
+        missingMedia: 'slate',
+        onMediaError: (mediaId, error) => {
+          if (this.failedMedia.has(mediaId)) return;
+          this.failedMedia.add(mediaId);
+          this.onRenderError?.(error, mediaId);
+        },
+      });
+    } catch (error) {
+      this.paintErrorFrame();
+      this.onRenderError?.(error, null);
+    }
+  }
+
+  /** Fase 7: a full red frame when the composite itself failed. */
+  private paintErrorFrame(): void {
+    try {
+      const ctx = this.canvas.getContext('2d');
+      if (!ctx) return;
+      ctx.setTransform(1, 0, 0, 1, 0, 0);
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = MISSING_MEDIA_COLORS.fill;
+      ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+      ctx.fillStyle = MISSING_MEDIA_COLORS.text;
+      ctx.font = `600 ${Math.max(12, Math.round(this.canvas.height / 16))}px system-ui, sans-serif`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('Error de previsualización', this.canvas.width / 2, this.canvas.height / 2);
+    } catch {
+      // The surface itself is gone (context lost): nothing left to paint.
+    }
   }
 
   /** Frees the loop and the mix. */

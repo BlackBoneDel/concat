@@ -5,9 +5,13 @@
  * The timeline toolbar: tool switcher (V C B N Y U), snapping toggle,
  * edit actions (split, delete, duplicate, group, link), marker add,
  * undo/redo and the zoom control.
+ *
+ * Fase 7 hook: every button is a `.concat-icon-btn` with an inline SVG glyph
+ * from `ui/components/icons.ts` and a native tooltip ("Cuchilla (C)").
  */
 
 import type { ToolId } from './types.ts';
+import { iconButton, setPressed, type IconName } from '../components/icons.ts';
 
 /** The actions the toolbar buttons trigger. */
 export interface ToolbarActions {
@@ -25,14 +29,14 @@ export interface ToolbarActions {
 }
 
 /** One tool's button metadata. */
-const TOOL_BUTTONS: { id: ToolId; label: string; key: string; title: string }[] = [
-  { id: 'select', label: '⬚', key: 'V', title: 'Selección (V)' },
-  { id: 'blade', label: '✂', key: 'C', title: 'Cuchilla (C)' },
-  { id: 'ripple', label: '⇢', key: 'B', title: 'Ripple (B)' },
-  { id: 'roll', label: '⇔', key: 'U', title: 'Roll (U)' },
-  { id: 'slip', label: '⇤⇥', key: 'N', title: 'Slip (N)' },
-  { id: 'slide', label: '⇥⇤', key: 'Y', title: 'Slide (Y)' },
-  { id: 'pen', label: '✎', key: 'P', title: 'Pluma (P)' },
+export const TOOL_BUTTONS: readonly { id: ToolId; icon: IconName; key: string; label: string }[] = [
+  { id: 'select', icon: 'select', key: 'V', label: 'Selección' },
+  { id: 'blade', icon: 'split', key: 'C', label: 'Cuchilla (Split)' },
+  { id: 'ripple', icon: 'ripple', key: 'B', label: 'Ripple' },
+  { id: 'roll', icon: 'roll', key: 'U', label: 'Roll' },
+  { id: 'slip', icon: 'slip', key: 'N', label: 'Slip' },
+  { id: 'slide', icon: 'slide', key: 'Y', label: 'Slide' },
+  { id: 'pen', icon: 'pen', key: 'P', label: 'Pluma (keyframes)' },
 ];
 
 /** The toolbar row. */
@@ -53,72 +57,60 @@ export class Toolbar {
     this.element.className = 'tl-toolbar';
     this.element.setAttribute('role', 'toolbar');
     this.element.setAttribute('aria-label', 'Herramientas del timeline');
-    const signal = this.abort.signal;
 
     for (const tool of TOOL_BUTTONS) {
-      const button = this.button(tool.label, tool.title);
-      button.addEventListener('click', () => actions.setTool(tool.id), { signal });
+      const button = this.button(tool.icon, tool.label, tool.key, () => actions.setTool(tool.id));
+      button.classList.add(`tl-tool-${tool.id}`);
+      setPressed(button, tool.id === 'select');
       this.toolButtons.set(tool.id, button);
       this.element.appendChild(button);
     }
     this.element.appendChild(this.divider());
 
-    this.snapButton = this.button('🧲', 'Snapping magnético (S)');
-    this.snapButton.setAttribute('aria-pressed', 'true');
-    this.snapButton.addEventListener('click', () => actions.toggleSnapping(), { signal });
+    this.snapButton = this.button('magnet', 'Snapping magnético', 'S', () => actions.toggleSnapping());
+    setPressed(this.snapButton, true);
     this.element.appendChild(this.snapButton);
 
-    const split = this.button('✂', 'Dividir en el playhead (Ctrl+K)');
-    split.addEventListener('click', () => actions.splitAtPlayhead(), { signal });
-    const del = this.button('🗑', 'Eliminar selección (Supr)');
-    del.addEventListener('click', () => actions.deleteSelection(), { signal });
-    const dup = this.button('⧉', 'Duplicar (Ctrl+D)');
-    dup.addEventListener('click', () => actions.duplicateSelection(), { signal });
-    const group = this.button('▦', 'Agrupar (Ctrl+G)');
-    group.addEventListener('click', () => actions.groupSelection(), { signal });
-    const link = this.button('🔗', 'Vincular video+audio (Ctrl+L)');
-    link.addEventListener('click', () => actions.linkSelection(), { signal });
-    const marker = this.button('📍', 'Añadir marker (M)');
-    marker.addEventListener('click', () => actions.addMarker(), { signal });
-    this.element.append(split, del, dup, group, link, marker);
+    this.element.append(
+      this.button('split', 'Dividir en el playhead', 'Ctrl+K', () => actions.splitAtPlayhead()),
+      this.button('trash', 'Eliminar selección', 'Supr', () => actions.deleteSelection()),
+      this.button('duplicate', 'Duplicar', 'Ctrl+D', () => actions.duplicateSelection()),
+      this.button('group', 'Agrupar', 'Ctrl+G', () => actions.groupSelection()),
+      this.button('link', 'Vincular vídeo y audio', 'Ctrl+L', () => actions.linkSelection()),
+      this.button('marker', 'Añadir marcador', 'M', () => actions.addMarker()),
+    );
     this.element.appendChild(this.divider());
 
-    const addVideo = this.button('＋V', 'Añadir pista de video');
-    addVideo.addEventListener('click', () => actions.addTrack('video'), { signal });
-    const addAudio = this.button('＋A', 'Añadir pista de audio');
-    addAudio.addEventListener('click', () => actions.addTrack('audio'), { signal });
-    this.element.append(addVideo, addAudio);
+    this.element.append(
+      this.button('videoPlus', 'Añadir pista de vídeo', undefined, () => actions.addTrack('video')),
+      this.button('audioPlus', 'Añadir pista de audio', undefined, () => actions.addTrack('audio')),
+    );
     this.element.appendChild(this.divider());
 
-    this.undoButton = this.button('↶', 'Deshacer (Ctrl+Z)');
-    this.undoButton.addEventListener('click', () => actions.undo(), { signal });
-    this.redoButton = this.button('↷', 'Rehacer (Ctrl+Y)');
-    this.redoButton.addEventListener('click', () => actions.redo(), { signal });
+    this.undoButton = this.button('undo', 'Deshacer', 'Ctrl+Z', () => actions.undo());
+    this.redoButton = this.button('redo', 'Rehacer', 'Ctrl+Y', () => actions.redo());
     this.element.append(this.undoButton, this.redoButton);
     if (zoomSlot) this.element.appendChild(zoomSlot);
   }
 
   /** Marks the active tool and toggle states. */
   setTool(tool: ToolId, snapping: boolean, canUndo: boolean, canRedo: boolean): void {
-    for (const [id, button] of this.toolButtons) {
-      button.setAttribute('aria-pressed', String(id === tool));
-      button.classList.toggle('active', id === tool);
-    }
-    this.snapButton.setAttribute('aria-pressed', String(snapping));
-    this.snapButton.classList.toggle('active', snapping);
+    for (const [id, button] of this.toolButtons) setPressed(button, id === tool);
+    setPressed(this.snapButton, snapping);
     this.undoButton.disabled = !canUndo;
     this.redoButton.disabled = !canRedo;
   }
 
-  /** Makes a toolbar button. */
-  private button(label: string, title: string): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'btn btn-ghost tl-tool-btn';
-    button.textContent = label;
-    button.title = title;
-    button.setAttribute('aria-label', title);
-    return button;
+  /**
+   * Makes a toolbar icon button.
+   * @param glyph the SVG icon.
+   * @param label accessible name.
+   * @param shortcut key shown in the tooltip.
+   * @param onClick the action.
+   * @returns the button.
+   */
+  private button(glyph: IconName, label: string, shortcut: string | undefined, onClick: () => void): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, shortcut, className: 'tl-tool-btn', onClick: () => onClick(), signal: this.abort.signal });
   }
 
   /** A separator. */

@@ -86,7 +86,7 @@ export function openRelinkModal(options: RelinkModalOptions): Promise<number> {
     row.candidates.forEach((c, i) => {
       const option = document.createElement('option');
       option.value = String(i);
-      option.textContent = `${c.path} — ${Math.round(c.score * 100)}%${c.hashMatch ? ' (hash ✓)' : ''}`;
+      option.textContent = `${c.path} — ${Math.round(c.score * 100)}%${c.hashMatch ? ' (hash idéntico)' : ''}`;
       pick.appendChild(option);
     });
     const chosenIndex = row.choice ? row.candidates.findIndex((c) => c.file === row.choice?.file) : -1;

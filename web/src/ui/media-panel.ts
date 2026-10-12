@@ -11,6 +11,7 @@
  * relink and OPFS actions.
  */
 
+import { icon } from './components/icons.ts';
 import type { MediaAsset } from '../media/media-pool.ts';
 import type { AppContext } from './app-context.ts';
 import { formatDuration } from '../player/timecode.ts';
@@ -150,7 +151,8 @@ export class MediaPanel {
       thumbWrap.appendChild(img);
     } else {
       thumbWrap.classList.add('media-thumb-audio');
-      thumbWrap.textContent = '♪';
+      // Fase 7 hook: SVG glyph for audio-only assets.
+      thumbWrap.appendChild(icon('music', { size: 28, className: 'media-thumb-icon' }));
     }
     card.appendChild(thumbWrap);
 

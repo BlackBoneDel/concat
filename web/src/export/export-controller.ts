@@ -162,14 +162,16 @@ export class ExportController {
     const startedAt = now();
     const warnings: string[] = [];
     const cleanups: (() => void)[] = [];
-    this.env.media.forceOriginalQuality(true);
-    cleanups.push(() => this.env.media.forceOriginalQuality(false));
     try {
       this.report({ phase: 'preparing', message: 'Preparando la exportación…' });
+      // Fase 7 hook (QA): validate before touching anything — a 0×0 frame
+      // or a 0 fps rate never switches the media pool or builds an encoder.
       const problems = validateExportConfig(config);
       if (problems.length > 0) throw new ExportError('INVALID_RANGE', problems.join(' '));
       const fps = frameRateOf(config.frameRate);
       if (!fps) throw new ExportError('INVALID_RANGE', 'Frecuencia de fotogramas inválida.');
+      this.env.media.forceOriginalQuality(true);
+      cleanups.push(() => this.env.media.forceOriginalQuality(false));
 
       const snapshot = snapshotForExport(this.env.getDocument(), { burnSubtitles: config.burnSubtitles });
       const session = exportSession(snapshot);

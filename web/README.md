@@ -1,4 +1,4 @@
-# Concat Web — editor de vídeo 100% local (Fases 1–6)
+# Concat Web — editor de vídeo 100% local (Fases 1–7)
 
 Port of [`jub0t/Concat`](https://github.com/jub0t/Concat) (the open-source,
 cross-platform video editor) to a **100% local web application**. No servers,
@@ -56,6 +56,70 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 9. **Rhythm** — autosave every 30s + restore on reopen, undo per gesture,
    real-time canvas preview, all colors from theme variables, full keyboard
    shortcuts that never fire while typing.
+
+## Fase 7 — sistema de iconos SVG, HUD profesional y QA
+
+### Iconos (`src/ui/components/icons.ts`)
+
+Ya no queda ningún emoji en la interfaz. Todos los glifos son SVG inline
+dibujados sobre una rejilla de 24×24, con trazo `currentColor` de 2 px y
+extremos redondeados. No se usa ninguna librería de iconos.
+
+| API | Uso |
+|---|---|
+| `icon(name, {size, label, className, strokeWidth})` | `<svg class="concat-icon concat-icon-<kebab>">`, oculto a lectores salvo con `label` |
+| `iconMarkup(name, …)` | la misma salida como cadena con `xmlns` (para HTML estático) |
+| `iconButton({icon, label, shortcut, pressed, text, onClick, signal})` | `.concat-icon-btn` con `title="Label (K)"`, `aria-label` y `aria-keyshortcuts` |
+| `setPressed(btn, on)` / `setButtonIcon(btn, name)` | conmutadores (`.active` + `aria-pressed`) e intercambio de glifo (play ↔ pause, eye ↔ eye-off) |
+
+Grupos de iconos:
+
+- **Reproducción**: play, pause, stop, skipBack/Forward, stepBack/Forward y loop.
+- **Herramientas**: select, split, ripple, roll, slip, slide, pen y magnet.
+- **Pista**: eye/eyeOff, lock/unlock, volumeOn/Mute y headphones.
+- **Inspector**: keyframeEmpty/Filled/Add, link/unlink, group y marker.
+- **Sistema**: settings, export, sun, moon, zap, menu, keyboard, undo/redo y save.
+
+Dónde se aplican:
+
+- Barra de herramientas y zoom.
+- Cabeceras de pista: los toggles inactivos bajan de opacidad; mute se marca en rojo, solo y oculto en ámbar.
+- HUD de transporte, con tres zonas: timecode | controles centrados con play destacado | bucle + volumen.
+- Cabecera, con el icono del tema según el tema activo.
+- Inspector:
+  - El rombo de keyframe pasa de vacío a relleno en color de acento cuando hay una key en el instante del playhead. Se sincroniza con el evento `playhead-changed`.
+  - Pulsarlo añade o quita esa key.
+- Grip del stack de efectos, modales y panel de medios.
+
+Hallazgo de QA: el CSS de Fases 3–6 usaba 11 variables que nunca se habían
+definido (`--accent-primary`, `--bg-hover`, `--text-primary`…). Por eso el
+marquee, la herramienta activa y varios toggles se pintaban sin color. Ahora
+son alias de las variables de los tres temas.
+
+### QA de casos límite y estrés
+
+| Escenario | Antes | Ahora |
+|---|---|---|
+| Clip de 1 fotograma + crossfade de 1 s | `SetTransitionProperty` aceptaba cualquier duración, y un proyecto editado a mano dejaba una rampa de alpha de 1 s en un clip de 33 ms | `EditError` («no puede durar más que el clip más corto»); `EditorClip` limita `videoFadeIn` a la duración del clip |
+| Split en `t = 0` / `t = duración` / a 1 µs del borde | el borde exacto ya se rechazaba, pero a 1 µs quedaba un clip «fantasma» | `EditError` claro; ninguna mitad dura menos de `MIN_CLIP_DURATION` |
+| Export 0×0 o 0 fps | se validaba, pero después de pasar el pool a originales | la validación ocurre antes de tocar nada; `VideoEncoderPool` y los retardos GIF también se protegen (defensa en profundidad) |
+| Drag + 5 × Ctrl+Z | al soltar se aplicaban operaciones calculadas sobre un documento ya deshecho | el `DragManager` guarda el documento del gesto y llama a `cancel()` si el historial cambia (también desde `onEdited`) |
+| Export abortado a los 100 ms × 10 | — | sin cambios: 0 frames sin `close()`, superficies y codificadores liberados en cada intento |
+| Medio borrado durante PLAY | el rechazo de `getFrame` quedaba sin capturar en `void renderOnce()` | se dibuja una tarjeta roja «Media Missing», salta un aviso por medio con «Volver a vincular» y el bucle rAF sigue vivo |
+| Decodificación lenta durante PLAY | dos composites podían entrelazarse en el mismo canvas | los renders se serializan: uno pinta y, como mucho, otro espera la última posición |
+
+Tests nuevos:
+
+- `tests/edge-cases.test.ts` (23).
+- `tests/stress.test.ts` (11).
+- `tests/f7-icons.test.ts` (12). Incluye una guardia que falla si vuelve a aparecer un emoji en `src/`.
+
+### Métricas (Fase 7)
+
+| Métrica | Valor |
+|---|---|
+| Tests | 845 / 89 archivos (799 previos intactos salvo 1 selector de DOM) |
+| Bundle principal | 158,94 KB gzip (< 180 KB) |
 
 ## Fase 6 — exportación offline, PWA instalable y pulido de producción
 
@@ -498,7 +562,8 @@ Faithfulness details worth knowing:
 | 3 | Interactive multitrack timeline with professional editing | done |
 | 4 | Advanced media pipeline: proxies, FFmpeg fallback, audio/vision, subtitles, relinking | done |
 | 5 | Visual keyframes, video/audio effect stacks, advanced titling, presets | done |
-| 6 | Offline export MP4/WebM/GIF, installable PWA, project packages, storage manager | **done — this document** |
+| 6 | Offline export MP4/WebM/GIF, installable PWA, project packages, storage manager | done |
+| 7 | SVG icon system, pro HUD redesign, edge-case & stress QA | **done — this document** |
 
 ## License
 

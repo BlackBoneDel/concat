@@ -9,6 +9,7 @@
  * history step through the Fase 5 operations.
  */
 
+import { icon } from '../components/icons.ts';
 import {
   AddAudioEffectOperation,
   AddVideoEffectOperation,
@@ -83,7 +84,7 @@ function effectRow(host: EffectsStackHost, clip: DocumentClip, fx: EffectInstanc
   head.className = 'fx-stack-head';
   const grip = document.createElement('span');
   grip.className = 'fx-stack-grip';
-  grip.textContent = '≡';
+  grip.appendChild(icon('grip', { size: 14 })); // Fase 7 hook: SVG grip
   grip.title = 'Arrastra para reordenar (Alt+↑/↓ con el teclado)';
   grip.setAttribute('aria-hidden', 'true');
   const toggle = document.createElement('input');

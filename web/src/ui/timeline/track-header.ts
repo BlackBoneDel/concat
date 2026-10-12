@@ -5,6 +5,9 @@
  * The left column: one header per track with rename, kind badge,
  * mute/solo/lock/visibility toggles, collapse and reorder arrows. Heights
  * always match the content canvas, so the two columns scroll as one.
+ *
+ * Fase 7 hook: SVG toggles (eye/eye-off, volume/mute, headphones for solo,
+ * lock/unlock) that swap glyph with their state and dim while inactive.
  */
 
 import type { ProjectDocument } from '../../model/document.ts';
@@ -17,6 +20,7 @@ import {
   type EditOperation,
   type TrackKind,
 } from '../../editor/operations.ts';
+import { iconButton, setButtonIcon, setPressed, type IconName } from '../components/icons.ts';
 
 /** What a header needs from its host. */
 export interface TrackHeaderOptions {
@@ -68,13 +72,31 @@ export class TrackHeader {
     const solo = this.element.querySelector('.tl-toggle-solo');
     const lock = this.element.querySelector('.tl-toggle-lock');
     const visible = this.element.querySelector('.tl-toggle-visible');
-    if (mute instanceof HTMLButtonElement) mute.setAttribute('aria-pressed', String(track.muted));
-    if (solo instanceof HTMLButtonElement) {
-      solo.setAttribute('aria-pressed', String(track.extra['solo'] === true));
+    if (mute instanceof HTMLButtonElement) {
+      setPressed(mute, track.muted);
+      setButtonIcon(mute, track.muted ? 'volumeMute' : 'volumeOn');
+      mute.title = track.muted ? 'Activar sonido de la pista' : 'Silenciar pista';
     }
-    if (lock instanceof HTMLButtonElement) lock.setAttribute('aria-pressed', String(locked));
+    if (solo instanceof HTMLButtonElement) {
+      setPressed(solo, track.extra['solo'] === true);
+      solo.title = track.extra['solo'] === true ? 'Quitar solo' : 'Solo (escuchar solo esta pista)';
+    }
+    if (lock instanceof HTMLButtonElement) {
+      setPressed(lock, locked);
+      setButtonIcon(lock, locked ? 'lock' : 'unlock');
+      lock.title = locked ? 'Desbloquear pista' : 'Bloquear pista';
+    }
     if (visible instanceof HTMLButtonElement) {
+      // "Visible" is the normal state: the eye is pressed while shown.
       visible.setAttribute('aria-pressed', String(track.visible));
+      setButtonIcon(visible, track.visible ? 'eye' : 'eyeOff');
+      visible.title = track.visible ? 'Ocultar pista' : 'Mostrar pista';
+    }
+    const collapse = this.element.querySelector('.tl-collapse');
+    if (collapse instanceof HTMLButtonElement) {
+      setButtonIcon(collapse, collapsed ? 'expand' : 'collapse');
+      collapse.title = collapsed ? 'Expandir pista' : 'Contraer pista';
+      collapse.setAttribute('aria-label', collapse.title);
     }
     this.element.style.height = collapsed ? '24px' : kind === 'audio' ? '72px' : '96px';
   }
@@ -95,39 +117,26 @@ export class TrackHeader {
     const buttons = document.createElement('div');
     buttons.className = 'tl-track-buttons';
     buttons.append(
-      this.toggleButton('tl-toggle-visible', 'Ocultar/mostrar video', '👁', () => this.toggle('visible')),
-      this.toggleButton('tl-toggle-mute', 'Silenciar', 'M', () => this.toggle('mute')),
-      this.toggleButton('tl-toggle-solo', 'Solo', 'S', () => this.toggle('solo')),
-      this.toggleButton('tl-toggle-lock', 'Bloquear', '🔒', () => this.toggle('lock')),
-      this.actionButton('tl-collapse', 'Contraer', '–', () => this.collapse()),
-      this.actionButton('tl-move-up', 'Subir pista', '↑', () => this.move(-1)),
-      this.actionButton('tl-move-down', 'Bajar pista', '↓', () => this.move(1)),
+      this.toggleButton('tl-toggle-visible', 'Ocultar/mostrar video', 'eye', () => this.toggle('visible')),
+      this.toggleButton('tl-toggle-mute', 'Silenciar', 'volumeOn', () => this.toggle('mute')),
+      this.toggleButton('tl-toggle-solo', 'Solo', 'headphones', () => this.toggle('solo')),
+      this.toggleButton('tl-toggle-lock', 'Bloquear', 'unlock', () => this.toggle('lock')),
+      this.actionButton('tl-collapse', 'Contraer', 'collapse', () => this.collapse()),
+      this.actionButton('tl-move-up', 'Subir pista', 'arrowUp', () => this.move(-1)),
+      this.actionButton('tl-move-down', 'Bajar pista', 'arrowDown', () => this.move(1)),
     );
     this.element.append(kindBadge, name, buttons);
     this.element.setAttribute('role', 'group');
   }
 
-  /** Makes a toggle button. */
-  private toggleButton(className: string, label: string, text: string, onClick: () => void): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `tl-track-btn ${className}`;
-    button.textContent = text;
-    button.setAttribute('aria-label', label);
-    button.setAttribute('aria-pressed', 'false');
-    button.addEventListener('click', onClick);
-    return button;
+  /** Makes a toggle button (glyph swapped by {@link refresh}). */
+  private toggleButton(className: string, label: string, glyph: IconName, onClick: () => void): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, className: `tl-track-btn is-sm ${className}`, pressed: false, size: 14, onClick: () => onClick() });
   }
 
   /** Makes a plain action button. */
-  private actionButton(className: string, label: string, text: string, onClick: () => void): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = `tl-track-btn ${className}`;
-    button.textContent = text;
-    button.setAttribute('aria-label', label);
-    button.addEventListener('click', onClick);
-    return button;
+  private actionButton(className: string, label: string, glyph: IconName, onClick: () => void): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, className: `tl-track-btn is-sm ${className}`, size: 14, onClick: () => onClick() });
   }
 
   /** Runs a toggle through history. */

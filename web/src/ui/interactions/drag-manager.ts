@@ -6,6 +6,11 @@
  * right gesture for the active tool (select/blade/ripple/roll/slip/slide/
  * pen), keeps every drag preview-only until pointerup, and turns the
  * finished gesture into exactly one history step. Escape cancels.
+ *
+ * Fase 7 hook (QA): a gesture remembers the document it started on. If the
+ * history moves underneath it (Ctrl+Z mid-drag, an autosave rebase, a
+ * dialog edit) the gesture is cancelled instead of committing operations
+ * computed against a document that no longer exists.
  */
 
 import { Rational } from '../../core/rational.ts';
@@ -77,6 +82,10 @@ export class DragManager {
   private startedOnClip = '';
   private trimMode: TrimMode = 'normal';
   private readonly abort = new AbortController();
+  /** Fase 7: the history document the running gesture was computed on. */
+  private gestureDoc: ProjectDocument | null = null;
+  /** Fase 7: gestures cancelled because the document changed underneath. */
+  private externalCancels = 0;
 
   /**
    * @param options host wiring.
@@ -125,6 +134,39 @@ export class DragManager {
     this.selectionDrag.cancel();
   }
 
+  /** True while a pointer gesture is in progress. */
+  get isDragging(): boolean {
+    return this.pointerDown && this.dragKind !== 'none';
+  }
+
+  /** Fase 7: how many gestures were cancelled by external edits (tests, telemetry-free diagnostics). */
+  get externalCancelCount(): number {
+    return this.externalCancels;
+  }
+
+  /**
+   * Fase 7: cancels the running gesture when the history document is no
+   * longer the one it started on. Called on every pointer event and by the
+   * panel after any edit/undo/redo.
+   * @returns whether a gesture was cancelled.
+   */
+  syncWithHistory(): boolean {
+    if (!this.pointerDown || this.gestureDoc === null) return false;
+    if (this.options.history.currentDoc === this.gestureDoc) return false;
+    if (this.dragKind === 'playhead') {
+      // Scrubbing does not depend on the document: keep following the pointer.
+      this.gestureDoc = this.options.history.currentDoc;
+      return false;
+    }
+    this.pointerDown = false;
+    this.gestureDoc = null;
+    this.externalCancels += 1;
+    this.options.view.setDragPreview(null);
+    this.cancelGesture();
+    this.startedOnClip = '';
+    return true;
+  }
+
   /** Cancels the running gesture (Escape). */
   cancelGesture(): void {
     this.keyframeDrag.cancel();
@@ -167,6 +209,7 @@ export class DragManager {
     if (event.button === 2) return; // context menu owns right-click
     const { x, y } = this.contentPoint(event);
     this.pointerDown = true;
+    this.gestureDoc = this.options.history.currentDoc;
     const tool = this.options.tool();
     const shift = event.shiftKey;
     const ctrl = event.ctrlKey || event.metaKey;
@@ -243,6 +286,7 @@ export class DragManager {
   private readonly onPointerMove = (event: PointerEvent): void => {
     const { x, y } = this.contentPoint(event);
     if (!this.pointerDown) return;
+    if (this.syncWithHistory()) return;
     switch (this.dragKind) {
       case 'keyframe':
         this.keyframeDrag.update(x, y, {
@@ -292,7 +336,9 @@ export class DragManager {
 
   private readonly onPointerUp = (event: PointerEvent): void => {
     if (!this.pointerDown) return;
+    if (this.syncWithHistory()) return;
     this.pointerDown = false;
+    this.gestureDoc = null;
     const shift = event.shiftKey;
     switch (this.dragKind) {
       case 'keyframe': {
@@ -357,6 +403,7 @@ export class DragManager {
 
   private readonly onPointerCancel = (): void => {
     this.pointerDown = false;
+    this.gestureDoc = null;
     this.cancelGesture();
   };
 
@@ -440,6 +487,8 @@ export class DragManager {
       for (const op of ops) this.options.history.execute(op);
       this.options.history.commitTransaction();
     }
+    // Our own edit is not an external change.
+    if (this.gestureDoc !== null) this.gestureDoc = this.options.history.currentDoc;
     this.options.onChange();
   }
 }

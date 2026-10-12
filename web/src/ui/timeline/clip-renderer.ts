@@ -128,10 +128,8 @@ function drawClipFace(
     ctx.fillStyle = open ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.3)';
     ctx.fillRect(button.x, button.y, button.w, button.h);
     ctx.fillStyle = '#ffffff';
-    ctx.font = '700 10px system-ui, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(open ? '⏶' : '⏷', button.x + button.w / 2, button.y + 1);
-    ctx.textAlign = 'left';
+    // Fase 7 hook: a stroked chevron (the HUD's chevron-up/down) instead of a glyph.
+    drawChevron(ctx, button.x + button.w / 2, button.y + button.h / 2, Math.min(button.w, button.h) * 0.28, open ? 'up' : 'down');
     if (clip.keys.length > 0 && !open) {
       ctx.beginPath();
       ctx.arc(button.x - 4, button.y + button.h / 2, 2, 0, Math.PI * 2);
@@ -234,4 +232,28 @@ function formatSpan(seconds: number): string {
   const m = Math.floor(whole / 60);
   const s = whole % 60;
   return `${m}:${String(s).padStart(2, '0')}.${tenths}`;
+}
+
+/**
+ * Fase 7: a 2 px round chevron, the canvas twin of the SVG `chevronUp` /
+ * `chevronDown` icons (fonts may lack ⏶/⏷ or render them as emoji).
+ * @param ctx the 2D context (fill style is reused as the stroke colour).
+ * @param cx centre x.
+ * @param cy centre y.
+ * @param half half-width of the chevron.
+ * @param direction which way it points.
+ */
+export function drawChevron(ctx: CanvasRenderingContext2D, cx: number, cy: number, half: number, direction: 'up' | 'down'): void {
+  const rise = (direction === 'down' ? 1 : -1) * half * 0.55;
+  ctx.save();
+  ctx.strokeStyle = ctx.fillStyle;
+  ctx.lineWidth = 2;
+  ctx.lineCap = 'round';
+  ctx.lineJoin = 'round';
+  ctx.beginPath();
+  ctx.moveTo(cx - half, cy - rise);
+  ctx.lineTo(cx, cy + rise);
+  ctx.lineTo(cx + half, cy - rise);
+  ctx.stroke();
+  ctx.restore();
 }

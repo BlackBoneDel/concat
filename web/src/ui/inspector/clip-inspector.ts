@@ -41,6 +41,27 @@ import { presetsSection } from './presets-section.ts';
 import { textAdvancedSection } from './text-advanced-section.ts';
 import type { PresetManager } from '../../presets/preset-manager.ts';
 import { getStudioServices } from '../studio-services.ts';
+import { icon, iconButton, setButtonIcon, setPressed } from '../components/icons.ts';
+import { PLAYHEAD_EVENT } from '../ui-events.ts';
+
+/** Fase 7: a key counts as "at the playhead" within this many seconds. */
+export const KEYFRAME_HIT_SECONDS = 1 / 120;
+
+/**
+ * Fase 7: whether a property has a key at the playhead.
+ * @param clip the clip.
+ * @param property the animated property.
+ * @param seconds the playhead (timeline seconds).
+ * @returns the key's fraction, or `null`.
+ */
+export function keyAtPlayhead(clip: DocumentClip, property: KeyProperty, seconds: number): number | null {
+  const length = Math.max(1 / 60, clip.duration);
+  for (const key of clip.keys) {
+    if (key.property !== property) continue;
+    if (Math.abs(clip.start + key.at * length - seconds) <= KEYFRAME_HIT_SECONDS) return key.at;
+  }
+  return null;
+}
 
 /** What the inspector needs from its host. */
 export interface InspectorOptions {
@@ -72,6 +93,9 @@ export class ClipInspector {
   /** Fase 5: the live Bézier editor (disposed on every rebuild). */
   private bezier: BezierEditor | null = null;
   private readonly unsubscribeKeyframes: () => void;
+  /** Fase 7: the per-property ◆ toggles, re-synced on every playhead move. */
+  private readonly keyframeToggles = new Map<KeyProperty, HTMLButtonElement>();
+  private readonly playheadAbort = new AbortController();
 
   /**
    * @param options host wiring.
@@ -86,11 +110,16 @@ export class ClipInspector {
     this.unsubscribeKeyframes = keyframeSelection.subscribe(() => {
       if (!this.element.hidden && this.clipId) this.show(this.clipId);
     });
+    // Fase 7 hook: the ◆ toggles fill in when the playhead sits on a key.
+    if (typeof document !== 'undefined') {
+      document.addEventListener(PLAYHEAD_EVENT, () => this.syncKeyframeToggles(), { signal: this.playheadAbort.signal });
+    }
   }
 
   /** Releases the keyframe subscription and the Bézier editor. */
   dispose(): void {
     this.unsubscribeKeyframes();
+    this.playheadAbort.abort();
     this.bezier?.dispose();
     this.bezier = null;
   }
@@ -411,13 +440,19 @@ export class ClipInspector {
     this.element.appendChild(group);
   }
 
-  /** Keyframe (◆) controls per property. */
+  /**
+   * Keyframe controls per property (Fase 7 hook: SVG). Each row has a toggle
+   * that shows `keyframeEmpty`, or `keyframeFilled` in the accent colour
+   * when a key sits at the playhead — clicking adds or removes that key —
+   * followed by the existing keys (click one to delete it).
+   */
   private buildKeyframeSection(keys: readonly { property: KeyProperty; at: number; value: number }[]): void {
+    this.keyframeToggles.clear();
     const group = document.createElement('div');
     group.className = 'inspector-group';
     const heading = document.createElement('h3');
     heading.className = 'inspector-group-title';
-    heading.textContent = 'Keyframes ◆';
+    heading.append('Keyframes', icon('keyframeFilled', { size: 13 }));
     group.appendChild(heading);
     const doc = this.options.getDocument();
     const clip = currentTimeline(doc).clips.find((candidate) => candidate.id === this.clipId);
@@ -429,45 +464,66 @@ export class ClipInspector {
       const title = document.createElement('span');
       title.textContent = property;
       row.appendChild(title);
-      const propertyKeys = keys.filter((key) => key.property === property);
-      for (const key of propertyKeys) {
+      const toggle = iconButton({
+        icon: 'keyframeEmpty',
+        label: `Keyframe de ${property} en el playhead`,
+        className: 'keyframe-toggle keyframe-add is-sm',
+        size: 15,
+        onClick: () => this.toggleKeyAtPlayhead(property),
+      });
+      this.keyframeToggles.set(property, toggle);
+      row.appendChild(toggle);
+      for (const key of keys.filter((candidate) => candidate.property === property)) {
+        const seconds = clip.start + key.at * clipLen;
         const diamond = document.createElement('button');
         diamond.type = 'button';
         diamond.className = 'keyframe-diamond';
-        diamond.textContent = '◆';
-        diamond.title = `${property} @ ${key.at.toFixed(2)}s = ${key.value}`;
-        diamond.setAttribute('aria-label', `Keyframe ${property} en ${key.at.toFixed(2)} segundos`);
+        diamond.appendChild(icon('keyframeFilled', { size: 12 }));
+        diamond.title = `${property} @ ${seconds.toFixed(2)} s = ${key.value} — clic para eliminar`;
+        diamond.setAttribute('aria-label', `Eliminar keyframe de ${property} en ${seconds.toFixed(2)} segundos`);
         diamond.addEventListener('click', () => {
-          this.options.run(
-            new RemoveKeyframeOperation(this.clipId, property, keyframeId(property, key.at)),
-          );
+          this.options.run(new RemoveKeyframeOperation(this.clipId, property, keyframeId(property, key.at)));
         });
         row.appendChild(diamond);
       }
-      const add = document.createElement('button');
-      add.type = 'button';
-      add.className = 'btn btn-ghost keyframe-add';
-      add.textContent = '◆+';
-      add.title = `Añadir keyframe de ${property} en el playhead`;
-      add.setAttribute('aria-label', `Añadir keyframe de ${property}`);
-      add.addEventListener('click', () => {
-        // AddKeyframe takes timeline seconds; keys store the clip fraction.
-        const local = Math.min(1, Math.max(0, (this.options.playheadSeconds() - clip.start) / clipLen));
-        const timelineTime = clip.start + local * clip.duration;
-        this.options.run(
-          new AddKeyframeOperation(
-            this.clipId,
-            property,
-            Rational.approximate(timelineTime) ?? Rational.ZERO,
-            this.constantOf(property),
-            KeyEase.LINEAR,
-          ),
-        );
-      });
-      row.appendChild(add);
       group.appendChild(row);
     }
     this.element.appendChild(group);
+    this.syncKeyframeToggles();
+  }
+
+  /** Fase 7: reflects "key at the playhead" on every ◆ toggle. */
+  syncKeyframeToggles(): void {
+    if (this.keyframeToggles.size === 0 || this.element.hidden) return;
+    const clip = currentTimeline(this.options.getDocument()).clips.find((candidate) => candidate.id === this.clipId);
+    if (!clip) return;
+    const seconds = this.options.playheadSeconds();
+    for (const [property, toggle] of this.keyframeToggles) {
+      const hit = keyAtPlayhead(clip, property, seconds) !== null;
+      setButtonIcon(toggle, hit ? 'keyframeFilled' : 'keyframeEmpty');
+      setPressed(toggle, hit);
+      toggle.classList.toggle('has-key', hit);
+      toggle.title = hit ? `Quitar el keyframe de ${property} en el playhead` : `Añadir keyframe de ${property} en el playhead`;
+    }
+  }
+
+  /** Fase 7: adds the key at the playhead, or removes the one already there. */
+  private toggleKeyAtPlayhead(property: KeyProperty): void {
+    const clip = currentTimeline(this.options.getDocument()).clips.find((candidate) => candidate.id === this.clipId);
+    if (!clip) return;
+    const seconds = this.options.playheadSeconds();
+    const existing = keyAtPlayhead(clip, property, seconds);
+    if (existing !== null) {
+      this.options.run(new RemoveKeyframeOperation(this.clipId, property, keyframeId(property, existing)));
+      return;
+    }
+    // AddKeyframe takes timeline seconds; keys store the clip fraction.
+    const clipLen = Math.max(1 / 60, clip.duration);
+    const local = Math.min(1, Math.max(0, (seconds - clip.start) / clipLen));
+    const timelineTime = clip.start + local * clip.duration;
+    this.options.run(
+      new AddKeyframeOperation(this.clipId, property, Rational.approximate(timelineTime) ?? Rational.ZERO, this.constantOf(property), KeyEase.LINEAR),
+    );
   }
 
   /** The clip's current constant for a property. */

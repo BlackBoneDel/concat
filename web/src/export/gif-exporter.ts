@@ -43,6 +43,8 @@ export function frameDelayMs(fps: number): number {
  * @returns centiseconds.
  */
 export function frameDelayCentiseconds(index: number, fps: number): number {
+  // Fase 7 hook (QA): 0/negative/NaN fps would write NaN into the header.
+  if (!(fps > 0) || !Number.isFinite(fps)) return 2;
   const at = (n: number): number => Math.round((n * 100) / fps);
   return Math.max(2, at(index + 1) - at(index));
 }

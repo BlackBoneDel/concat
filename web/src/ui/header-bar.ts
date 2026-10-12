@@ -17,6 +17,10 @@ import type { AppContext } from './app-context.ts';
 import markUrl from '../assets/concat-mark.png';
 import { getMediaTools } from './media-tools.ts';
 import { getProductionServices } from './production-services.ts';
+import { icon, iconButton, setButtonIcon, type IconName } from './components/icons.ts';
+
+/** Fase 7: the glyph of each palette on the theme toggle. */
+const THEME_ICONS: Record<ThemeName, IconName> = { dark: 'moon', light: 'sun', cyberpunk: 'zap' };
 
 /** Fase 6 shortcut of the export dialog (bound in main.ts). */
 export const EXPORT_SHORTCUT = 'Ctrl+E';
@@ -40,6 +44,8 @@ export class HeaderBar {
   private readonly proxyToggle: HTMLButtonElement;
   /** Fase 6 hook: the Export button. */
   private readonly exportButton: HTMLButtonElement;
+  /** Fase 7: the theme toggle (sun / moon / zap per palette). */
+  private readonly themeButton: HTMLButtonElement;
 
   /**
    * @param root the header element.
@@ -66,15 +72,15 @@ export class HeaderBar {
     // Menus.
     const menus = document.createElement('nav');
     menus.className = 'header-menus';
-    menus.appendChild(this.menuButton('Archivo', () => this.openFileMenu()));
-    menus.appendChild(this.menuButton('Edición', () => this.openEditMenu()));
-    menus.appendChild(this.menuButton('Ajustes', () => this.openSettingsModal()));
+    menus.appendChild(this.menuButton('Archivo', () => this.openFileMenu(), 'menu'));
+    menus.appendChild(this.menuButton('Edición', () => this.openEditMenu(), 'pen'));
+    menus.appendChild(this.menuButton('Ajustes', () => this.openSettingsModal(), 'settings'));
     // Fase 6 hook: the searchable shortcut sheet when installed.
     menus.appendChild(this.menuButton('Atajos', () => {
       const production = getProductionServices();
       if (production) production.openShortcuts();
       else this.openShortcutsModal();
-    }));
+    }, 'keyboard'));
     this.root.appendChild(menus);
 
     // Project identity.
@@ -93,11 +99,12 @@ export class HeaderBar {
     // Actions.
     const actions = document.createElement('div');
     actions.className = 'header-actions';
-    const undo = this.actionButton('↶', 'Deshacer (Ctrl+Z)', () => this.undo());
-    const redo = this.actionButton('↷', 'Rehacer (Ctrl+Shift+Z)', () => this.redo());
+    // Fase 7 hook: SVG icon buttons.
+    const undo = this.actionButton('undo', 'Deshacer', 'Ctrl+Z', () => this.undo());
+    const redo = this.actionButton('redo', 'Rehacer', 'Ctrl+Shift+Z', () => this.redo());
     actions.appendChild(undo);
     actions.appendChild(redo);
-    actions.appendChild(this.actionButton('💾', 'Guardar (Ctrl+S)', () => void this.ctx.saveProject()));
+    actions.appendChild(this.actionButton('save', 'Guardar', 'Ctrl+S', () => void this.ctx.saveProject()));
     // Fase 4: proxy playback toggle.
     this.proxyToggle = document.createElement('button');
     this.proxyToggle.type = 'button';
@@ -110,24 +117,27 @@ export class HeaderBar {
       this.syncProxyToggle();
     });
     actions.appendChild(this.proxyToggle);
-    actions.appendChild(
-      this.actionButton('◐', 'Cambiar tema', () => {
-        const order: ThemeName[] = ['dark', 'light', 'cyberpunk'];
-        const next = order[(order.indexOf(this.ctx.theme.theme) + 1) % order.length] ?? 'dark';
-        this.ctx.theme.apply(next, (theme) => {
-          this.ctx.settings.theme = theme;
-          this.ctx.saveSettings();
-        });
-      }),
-    );
+    this.themeButton = this.actionButton(THEME_ICONS[this.ctx.theme.theme], 'Cambiar tema', undefined, () => {
+      const order: ThemeName[] = ['dark', 'light', 'cyberpunk'];
+      const next = order[(order.indexOf(this.ctx.theme.theme) + 1) % order.length] ?? 'dark';
+      this.ctx.theme.apply(next, (theme) => {
+        this.ctx.settings.theme = theme;
+        this.ctx.saveSettings();
+      });
+      this.syncThemeIcon();
+    });
+    actions.appendChild(this.themeButton);
+    this.syncThemeIcon();
     // Fase 6 hook: Export (Ctrl/Cmd+E), disabled while the timeline is empty.
-    this.exportButton = document.createElement('button');
-    this.exportButton.type = 'button';
-    this.exportButton.className = 'btn btn-primary btn-small header-export';
-    this.exportButton.textContent = 'Exportar';
-    this.exportButton.title = `Exportar vídeo (${EXPORT_SHORTCUT})`;
+    this.exportButton = iconButton({
+      icon: 'export',
+      label: 'Exportar vídeo',
+      shortcut: EXPORT_SHORTCUT,
+      text: 'Exportar',
+      className: 'header-export',
+      onClick: () => getProductionServices()?.openExport(),
+    });
     this.exportButton.setAttribute('aria-keyshortcuts', 'Control+E Meta+E');
-    this.exportButton.addEventListener('click', () => getProductionServices()?.openExport());
     actions.appendChild(this.exportButton);
     this.root.appendChild(actions);
 
@@ -158,6 +168,7 @@ export class HeaderBar {
   /** Reflects name and dirty state. */
   sync(): void {
     this.syncExport();
+    this.syncThemeIcon();
     this.projectName.textContent = this.ctx.session.name;
     this.saveState.textContent = this.ctx.session.dirty ? 'Cambios sin guardar' : 'Guardado';
     this.saveState.classList.toggle('dirty', this.ctx.session.dirty);
@@ -172,23 +183,27 @@ export class HeaderBar {
 
   // -- internals -----------------------------------------------------------
 
-  private menuButton(label: string, onClick: () => void): HTMLElement {
+  private menuButton(label: string, onClick: () => void, glyph?: IconName): HTMLElement {
     const button = document.createElement('button');
     button.type = 'button';
     button.className = 'header-menu';
-    button.textContent = label;
+    // Fase 7 hook: a leading SVG glyph; the text stays the accessible name.
+    if (glyph) button.appendChild(icon(glyph, { size: 15 }));
+    button.append(label);
     button.addEventListener('click', onClick);
     return button;
   }
 
-  private actionButton(icon: string, title: string, onClick: () => void): HTMLElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'btn btn-icon';
-    button.textContent = icon;
-    button.title = title;
-    button.addEventListener('click', onClick);
-    return button;
+  private actionButton(glyph: IconName, label: string, shortcut: string | undefined, onClick: () => void): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, shortcut, onClick: () => onClick() });
+  }
+
+  /** Fase 7: the theme button shows the active palette. */
+  private syncThemeIcon(): void {
+    const theme = this.ctx.theme.theme;
+    setButtonIcon(this.themeButton, THEME_ICONS[theme]);
+    const names: Record<ThemeName, string> = { dark: 'oscuro', light: 'claro', cyberpunk: 'cyberpunk' };
+    this.themeButton.title = `Tema ${names[theme]} — pulsa para cambiar`;
   }
 
   private openFileMenu(): void {

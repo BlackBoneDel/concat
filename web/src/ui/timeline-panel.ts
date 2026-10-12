@@ -306,6 +306,8 @@ export class TimelinePanel {
 
   /** Everything is up to date after an edit. */
   private onEdited(): void {
+    // Fase 7 hook (QA): an undo/redo/edit while dragging cancels the drag.
+    this.drag?.syncWithHistory();
     this.view?.relayout();
     this.view?.requestRender();
     this.syncSize();

@@ -11,6 +11,7 @@ import {
   MIN_PIXELS_PER_SECOND,
   type TimelineView,
 } from './timeline-view.ts';
+import { iconButton, type IconName } from '../components/icons.ts';
 
 /** What the zoom control needs from its host. */
 export interface ZoomControlOptions {
@@ -37,10 +38,10 @@ export class ZoomControl {
     this.element.setAttribute('role', 'group');
     this.element.setAttribute('aria-label', 'Zoom del timeline');
 
-    const out = this.button('−', 'Alejar (Ctrl+-)');
-    const fit = this.button('Ajustar (Ctrl+0)', 'Ajustar al proyecto');
-    fit.textContent = '⊡';
-    const inn = this.button('+', 'Acercar (Ctrl+=)');
+    // Fase 7 hook: SVG glyphs instead of text symbols.
+    const out = this.button('zoomOut', 'Alejar', 'Ctrl+-');
+    const fit = this.button('fit', 'Ajustar al proyecto', 'Ctrl+0');
+    const inn = this.button('zoomIn', 'Acercar', 'Ctrl+=');
     this.slider = document.createElement('input');
     this.slider.type = 'range';
     this.slider.min = String(MIN_PIXELS_PER_SECOND);
@@ -58,14 +59,9 @@ export class ZoomControl {
     this.refresh();
   }
 
-  /** Makes a small button. */
-  private button(label: string, aria: string): HTMLButtonElement {
-    const button = document.createElement('button');
-    button.type = 'button';
-    button.className = 'btn btn-ghost tl-zoom-btn';
-    button.textContent = label;
-    button.setAttribute('aria-label', aria);
-    return button;
+  /** Makes a small icon button. */
+  private button(glyph: IconName, label: string, shortcut: string): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, shortcut, className: 'tl-zoom-btn is-sm', size: 16 });
   }
 
   /** Zooms by a factor around the playhead. */

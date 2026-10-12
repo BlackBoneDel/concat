@@ -273,7 +273,7 @@ export function drawKeyframeLanes(ctx: CanvasRenderingContext2D, context: DrawLa
     // Property label (click cycles).
     ctx.font = '600 10px system-ui, sans-serif';
     ctx.textBaseline = 'top';
-    const label = `${LANE_LABELS[property]} ▸`;
+    const label = `${LANE_LABELS[property]} ›`; // Fase 7: no emoji-prone glyphs
     const labelW = ctx.measureText(label).width + 8;
     ctx.fillStyle = colors.background;
     ctx.globalAlpha = 0.8;

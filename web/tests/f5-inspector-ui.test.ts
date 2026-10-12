@@ -130,7 +130,8 @@ describe('keyframe curve section', () => {
     const host = hostFor(session);
     const kept: BezierEditor[] = [];
     const empty = keyframeCurveSection(host, clipById(session, 'c1'), null, (e) => kept.push(e));
-    expect(empty.textContent).toContain('⏷');
+    // Fase 7: the ⏷ glyph became the SVG chevron of the HUD icon set.
+    expect(empty.querySelector('.concat-icon-chevron-down')).not.toBeNull();
     expect(kept).toHaveLength(0);
     const previews: (readonly number[] | null)[] = [];
     const ref = { clipId: 'c1', property: 'opacity' as const, keyframeId: keyframeId('opacity', 0.75) };

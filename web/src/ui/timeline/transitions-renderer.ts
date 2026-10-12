@@ -24,12 +24,13 @@ const SHORT_LABELS: Record<TransitionKind, string> = {
   'fade-black': 'FADE',
   'fade-white': 'FLASH',
   dissolve: 'DISS',
-  'wipe-left': 'W-◀',
-  'wipe-right': 'W-▶',
-  'wipe-up': 'W-▲',
-  'wipe-down': 'W-▼',
-  'slide-left': 'S-◀',
-  'slide-right': 'S-▶',
+  // Fase 7: plain arrows — ◀▶▲▼ render as emoji on several platforms.
+  'wipe-left': 'WIPE ←',
+  'wipe-right': 'WIPE →',
+  'wipe-up': 'WIPE ↑',
+  'wipe-down': 'WIPE ↓',
+  'slide-left': 'SLIDE ←',
+  'slide-right': 'SLIDE →',
 };
 
 /**

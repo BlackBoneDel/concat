@@ -130,7 +130,13 @@ export class EditorClip extends Clip {
     // Picture ramps come from the transition on the cut into this clip — the
     // cross-dissolve shape of the engine model. The document's `fadeIn`/
     // `fadeOut` are *audio* ramps and live in `audioFadeIn`/`audioFadeOut`.
-    const videoFadeIn = doc.transitionIn ? seconds(doc.transitionIn.duration) : Rational.ZERO;
+    // Fase 7 hook (QA): a transition can never outlast its clip (a 1-frame
+    // clip trimmed under a 1 s dissolve, a hand-edited project): clamp to
+    // the clip so the ramp stays a ramp and the picture still reaches 1.
+    const fadeSeconds = doc.transitionIn && Number.isFinite(doc.transitionIn.duration)
+      ? Math.min(Math.max(0, doc.transitionIn.duration), Math.max(0, doc.duration))
+      : 0;
+    const videoFadeIn = fadeSeconds > 0 ? seconds(fadeSeconds) : Rational.ZERO;
 
     super(
       new MediaRef(doc.mediaId),

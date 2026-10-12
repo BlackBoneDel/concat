@@ -211,6 +211,27 @@ class EditorApp implements AppContext {
       mediaPool: this.pool,
       audioContext,
     });
+    // Fase 7 hook (QA): a media file that dies mid-playback shows a red card
+    // in the preview plus one actionable toast — the rAF loop keeps going.
+    this.player.onRenderError = (error, mediaId) => {
+      console.warn('Error de previsualización', mediaId, error);
+      if (mediaId === null) {
+        this.notifications.warning('Error de previsualización', error instanceof Error ? error.message : String(error));
+        return;
+      }
+      const name = this.session.document.media.find((item) => item.id === mediaId)?.name ?? mediaId;
+      actionToast(this.notifications, {
+        type: 'warning',
+        title: 'Medio no disponible',
+        message: `${name} no se puede decodificar. Se muestra «Media Missing» en su lugar.`,
+        actionLabel: 'Volver a vincular',
+        onAction: () => {
+          this.player.clearMediaErrors();
+          this.media.openRelink(mediaId);
+        },
+        duration: 12_000,
+      });
+    };
 
     // The shell.
     const root = document.getElementById('app');

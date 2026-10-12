@@ -28,7 +28,22 @@ import type { FramePool, RenderContext2D, RenderImage, RenderTarget } from './ty
 export interface RenderOptions {
   /** Letterbox colour; black by default. */
   background?: string;
+  /**
+   * Fase 7: what a decoder failure does. `'throw'` (default — export must
+   * fail loudly, never ship a placeholder) propagates the error; `'slate'`
+   * (the preview) paints a red "Media Missing" card where the clip would be
+   * and keeps compositing the other layers.
+   */
+  missingMedia?: 'throw' | 'slate';
+  /** Fase 7: told about every decoder failure handled as a slate. */
+  onMediaError?: (mediaId: string, error: unknown) => void;
 }
+
+/** Fase 7: the colours of the missing-media card (theme-independent: it is
+ * picture content, like the letterbox). */
+export const MISSING_MEDIA_COLORS = Object.freeze({ fill: '#7a1f24', stripe: '#a3262d', text: '#ffffff' });
+/** Fase 7: the card's caption. */
+export const MISSING_MEDIA_LABEL = 'Media Missing';
 
 /**
  * Renders the timeline at `time` into `canvas`.
@@ -73,7 +88,7 @@ export async function renderFrame(
     for (const clipId of track.clips()) {
       const clip = timeline.clip(clipId);
       if (!clip || !clip.contains(time)) continue;
-      await drawClip(ctx, timeline, clip, time, mediaPool);
+      await drawClip(ctx, timeline, clip, time, mediaPool, options);
     }
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -86,6 +101,7 @@ async function drawClip(
   clip: Clip,
   time: Rational,
   mediaPool: FramePool,
+  options: RenderOptions = {},
 ): Promise<void> {
   // The four engine calls — the single definition every renderer agrees with.
   const sourceTime = clip.sourceTimeAt(time);
@@ -135,7 +151,20 @@ async function drawClip(
   if (kind === 'layer') return;
 
   const size = mediaPool.getSize(clip.media.path);
-  const source = await mediaPool.getFrame(clip.media.path, sourceTime);
+  let source: RenderImage | null;
+  try {
+    source = await mediaPool.getFrame(clip.media.path, sourceTime);
+  } catch (error) {
+    // Fase 7 hook (QA): a deleted file / dead decoder mid-playback.
+    if (options.missingMedia !== 'slate') throw error;
+    options.onMediaError?.(clip.media.path, error);
+    applyBlend(ctx, clip.blend, opacity);
+    applyTransform(ctx, transform, frameWidth, frameHeight, frameWidth, frameHeight);
+    drawMissingMediaSlate(ctx, frameWidth, frameHeight);
+    ctx.restore();
+    resetBlend(ctx);
+    return;
+  }
   if (!source) return;
 
   const intrinsic = intrinsicSize(source);
@@ -176,6 +205,34 @@ async function drawClip(
   drawSource(ctx, picture, sx, sy, sw, sh, frameWidth, frameHeight);
   ctx.restore();
   resetBlend(ctx);
+}
+
+/**
+ * Fase 7: the red "Media Missing" card over the clip's frame rectangle
+ * (frame space, top-left origin — same as `drawSource`), with a diagonal
+ * stripe and the caption.
+ * @param ctx the context (already transformed to the clip).
+ * @param frameWidth frame width.
+ * @param frameHeight frame height.
+ */
+export function drawMissingMediaSlate(ctx: RenderContext2D, frameWidth: number, frameHeight: number): void {
+  const x = 0;
+  const y = 0;
+  ctx.fillStyle = MISSING_MEDIA_COLORS.fill;
+  ctx.fillRect(x, y, frameWidth, frameHeight);
+  ctx.beginPath();
+  ctx.moveTo(x, y + frameHeight * 0.62);
+  ctx.lineTo(x + frameWidth * 0.62, y);
+  ctx.lineTo(x + frameWidth * 0.78, y);
+  ctx.lineTo(x, y + frameHeight * 0.78);
+  ctx.closePath();
+  ctx.fillStyle = MISSING_MEDIA_COLORS.stripe;
+  ctx.fill();
+  ctx.fillStyle = MISSING_MEDIA_COLORS.text;
+  ctx.font = `600 ${Math.max(12, Math.round(frameHeight / 14))}px system-ui, sans-serif`;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(MISSING_MEDIA_LABEL, frameWidth / 2, frameHeight / 2);
 }
 
 /** Blits the cropped source picture into its fitted rectangle of the frame. */
