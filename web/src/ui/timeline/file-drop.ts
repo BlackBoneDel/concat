@@ -52,6 +52,45 @@ export function dragHasFiles(event: DragEventLike): boolean {
 }
 
 /**
+ * The files of a drop, as a plain array (`DataTransfer.files` is a live
+ * `FileList`, empty for internal drags).
+ * @param event a (possibly synthetic) drag event.
+ * @returns the dropped files (never `null`).
+ */
+export function droppedFiles(event: DragEventLike): File[] {
+  const list = event.dataTransfer?.files;
+  if (!list) return [];
+  const files: File[] = [];
+  for (let i = 0; i < list.length; i += 1) {
+    const file = list[i];
+    if (file) files.push(file);
+  }
+  return files;
+}
+
+/** The non-enumerable flag {@link markDropHandled} puts on a drop event. */
+const HANDLED = '__concatDropHandled';
+
+/**
+ * Marks a drop as already imported by the zone that received it, so the
+ * window-wide capture (which hears the same event when the zone does not
+ * stop propagation) never imports the same files twice.
+ * @param event the drop event a drop zone consumed.
+ */
+export function markDropHandled(event: DragEventLike): void {
+  try {
+    Object.defineProperty(event, HANDLED, { value: true, configurable: true, enumerable: false });
+  } catch {
+    // Frozen event objects (some WebViews): the marker is a best-effort guard.
+  }
+}
+
+/** Whether {@link markDropHandled} already ran for this drop event. */
+export function isDropHandled(event: DragEventLike): boolean {
+  return (event as unknown as Record<string, unknown>)[HANDLED] === true;
+}
+
+/**
  * Makes `target` accept OS file drops.
  * @param target the drop zone (the timeline panel in the app).
  * @param options what to do with the files.
@@ -81,15 +120,14 @@ export function installFileDrop(target: DropTargetLike, options: FileDropOptions
     if (!dragHasFiles(event)) return;
     event.preventDefault();
     event.stopPropagation();
+    // The window-wide capture hears this same drop when a browser ignores
+    // `stopPropagation` (or the event was dispatched synthetically): the
+    // marker keeps the files from being imported a second time.
+    markDropHandled(event);
     depth = 0;
     target.classList.remove(activeClass);
-    const list = event.dataTransfer?.files;
-    if (!list || list.length === 0) return;
-    const files: File[] = [];
-    for (let i = 0; i < list.length; i += 1) {
-      const file = list[i];
-      if (file) files.push(file);
-    }
+    const files = droppedFiles(event);
+    if (files.length === 0) return;
     const rect = target.getBoundingClientRect();
     options.onFiles(files, {
       x: (event.clientX ?? 0) - rect.left,

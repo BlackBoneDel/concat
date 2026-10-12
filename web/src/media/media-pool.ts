@@ -11,9 +11,31 @@
  */
 
 import { Rational } from '../core/rational.ts';
+import { FrameRate } from '../core/time.ts';
 import type { FramePool, RenderImage } from '../render/types.ts';
-import { MediaDecoder, type MediaFallback, type MediaInfo } from './decoder.ts';
+import {
+  MediaDecoder,
+  METADATA_PROBE_TIMEOUT_MS,
+  PROBE_FALLBACK,
+  probeMediaMetadata,
+  withDeadline,
+  type MediaFallback,
+  type MediaInfo,
+} from './decoder.ts';
 import { generateThumbnail, thumbnailKey, MemoryThumbnailStore, type ThumbnailStore } from './thumbnail.ts';
+import { mediaKindOf, type ImportMediaKind } from './import/format-support.ts';
+
+/**
+ * How far along an asset's import is.
+ *
+ * - `processing`: the card is already in the library, the browser is still
+ *   probing it (thumbnail and real duration arrive with `ready`).
+ * - `ready`: metadata and artwork come from the file itself.
+ * - `error`: nothing could be read (unsupported codec, torn file): the asset
+ *   stays in the library with {@link PROBE_FALLBACK} metadata and its
+ *   placeholder thumbnail, never dropped.
+ */
+export type MediaAssetStatus = 'processing' | 'ready' | 'error';
 
 /** A loaded asset: what the library shows and the timeline references. */
 export interface MediaAsset {
@@ -31,6 +53,10 @@ export interface MediaAsset {
   importedAt: number;
   /** The local file this asset was imported from (kept for re-decode). */
   file: File | Blob;
+  /** Import progress; `processing` only while the background probe runs. */
+  status: MediaAssetStatus;
+  /** Why the metadata could not be read, when `status` is `error`. */
+  statusMessage: string | null;
 }
 
 /** Options for {@link MediaPool.constructor}. */
@@ -41,6 +67,24 @@ export interface MediaPoolOptions {
   preloadSeconds?: number;
   /** Fase 4: FFmpeg fallback handed to every decoder (lazy; never loaded unless needed). */
   fallback?: MediaFallback | null;
+  /** Strict metadata-probe deadline passed to every decoder (default 2 s). */
+  probeTimeoutMs?: number;
+}
+
+/** One file the pool took in, with the card that appeared for it. */
+export interface AcceptedFile {
+  file: File | Blob;
+  asset: MediaAsset;
+}
+
+/** What {@link MediaPool.addFiles} did with a batch. */
+export interface AddFilesResult {
+  /** Files that are media: their cards are already in `listMedia()`. */
+  accepted: AcceptedFile[];
+  /** Files that are not audio/video/image — the caller warns about them. */
+  rejected: File[];
+  /** Settles (never rejects) once every background probe finished. */
+  ready: Promise<MediaAsset[]>;
 }
 
 /** Fase 4: a proxy attached to an asset. */
@@ -53,6 +97,106 @@ interface AttachedProxy {
 /** Thumbs shown in the library grid. */
 const THUMB_WIDTH = 160;
 const THUMB_HEIGHT = 90;
+
+/**
+ * Deadline of the last-ditch probe run when the full one already came back
+ * empty: the browser had its 2 seconds inside the decoder, so this pass only
+ * fills in the provisional values and must not make the card spin again.
+ */
+const PROVISIONAL_PROBE_TIMEOUT_MS = 250;
+
+/**
+ * How much longer than the element probe the whole background import may
+ * take: the probe deadline (2 s) plus the budget of the duration-reveal seek
+ * (`revealDuration`, 2.5 s) that OBS-shaped WebM files need. It only fires
+ * when the browser truly stopped answering — the card is on screen from the
+ * first millisecond either way.
+ */
+const ENRICHMENT_GRACE_MS = 3000;
+
+/**
+ * The placeholder palette of the fallback thumbnails, per kind — a
+ * background colour and a drawn glyph (SVG shapes, never emoji: the project
+ * has an anti-emoji guard for a reason).
+ */
+const PLACEHOLDER_COLOURS: Record<ImportMediaKind, { background: string; glyph: string }> = {
+  video: {
+    background: '#1b1b28',
+    glyph: '<polygon points="70,30 70,58 92,44" fill="#e8e8f4"/>',
+  },
+  audio: {
+    background: '#161a2e',
+    glyph:
+      '<circle cx="66" cy="52" r="5" fill="#e8e8f4"/><rect x="70" y="28" width="3" height="24" fill="#e8e8f4"/>' +
+      '<circle cx="88" cy="47" r="5" fill="#e8e8f4"/><rect x="92" y="23" width="3" height="24" fill="#e8e8f4"/>',
+  },
+  image: {
+    background: '#1a241f',
+    glyph:
+      '<rect x="66" y="29" width="28" height="22" rx="3" fill="none" stroke="#e8e8f4" stroke-width="2"/>' +
+      '<circle cx="74" cy="37" r="3" fill="#e8e8f4"/>' +
+      '<path d="M68 49l7-7 5 5 5-4 5 6" fill="none" stroke="#e8e8f4" stroke-width="2"/>',
+  },
+};
+
+/**
+ * The fallback thumbnail: a coloured card with the file's own name, as a
+ * `data:` SVG. It is what the library shows while (and if) the real frame
+ * never arrives, so an unreadable file still has a recognisable card.
+ * @param kind the media kind (picks the glyph and the colour).
+ * @param name the file name shown under the glyph.
+ * @returns a `data:image/svg+xml` URL.
+ */
+export function placeholderThumbnail(kind: ImportMediaKind, name: string): string {
+  const colours = PLACEHOLDER_COLOURS[kind] ?? PLACEHOLDER_COLOURS.video;
+  const label = escapeXml(name.length > 26 ? `${name.slice(0, 25)}…` : name);
+  const svg =
+    '<svg xmlns="http://www.w3.org/2000/svg" width="160" height="90" viewBox="0 0 160 90">' +
+    `<rect width="160" height="90" fill="${colours.background}"/>` +
+    `${colours.glyph}` +
+    `<text x="80" y="70" text-anchor="middle" font-family="sans-serif" font-size="10" fill="#a6a6be">${label}</text>` +
+    '</svg>';
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
+/** Fallback counter for environments without `crypto.randomUUID`. */
+let idCounter = 0;
+
+/** A fresh asset id: `crypto.randomUUID` where available, else a local one. */
+function randomId(): string {
+  const source = globalThis.crypto as Crypto | undefined;
+  if (source && typeof source.randomUUID === 'function') return source.randomUUID();
+  idCounter += 1;
+  return `media-${Date.now().toString(36)}-${idCounter}`;
+}
+
+/** Escapes the five characters that would break the SVG above. */
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/** The kind a file claims to be, falling back to `video` for nameless blobs. */
+function kindOf(file: File | Blob, name: string, mime = file.type): ImportMediaKind {
+  return mediaKindOf(name, mime) ?? 'video';
+}
+
+/**
+ * Whether a probe produced nothing usable — no duration and no size, or an
+ * image without pixels. Nothing to show, so the provisional metadata takes
+ * over (and the FFmpeg fallback still gets its chance inside the decoder).
+ * @param info the probe result (or `null` when it threw).
+ * @returns `true` when the asset needs the documented provisional values.
+ */
+export function isInconclusiveProbe(info: MediaInfo | null): boolean {
+  if (!info) return true;
+  if (info.type === 'image') return info.width <= 0 || info.height <= 0;
+  return info.duration.asNumber() <= 0 && info.width <= 0;
+}
 
 /** Fase 6 hook: options of {@link MediaPool.getFrame}. */
 export interface FrameRequestOptions {
@@ -71,58 +215,289 @@ export class MediaPool implements FramePool {
   private useProxies = true;
   // Fase 6 hook: export forces original quality while it runs.
   private forceOriginal = false;
+  private readonly probeTimeoutMs: number;
+  /** The background import of every id currently being probed. */
+  private readonly inFlight = new Map<string, Promise<MediaAsset | null>>();
+  /** Per-asset revision: a late (stale) write never overwrites a newer one. */
+  private readonly revisions = new Map<string, number>();
+  private revisionCounter = 0;
+
+  /**
+   * Called synchronously the moment an asset's card exists (the optimistic
+   * shell), so the library can show it before any probing happens.
+   */
+  onMediaAdded: ((asset: MediaAsset) => void) | null = null;
+  /**
+   * Called when a background import finishes (or fails): real duration,
+   * size, thumbnail and `status` are on the asset by then.
+   */
+  onMediaUpdated: ((asset: MediaAsset) => void) | null = null;
 
   constructor(options: MediaPoolOptions = {}) {
     this.thumbnailStore = options.thumbnailStore ?? new MemoryThumbnailStore();
     this.preloadSeconds = options.preloadSeconds ?? 2;
     this.fallback = options.fallback ?? null;
+    this.probeTimeoutMs = options.probeTimeoutMs ?? METADATA_PROBE_TIMEOUT_MS;
   }
 
   /**
-   * Imports a local file: probes it, decodes a thumbnail, and makes it
-   * available to the compositor.
+   * Imports a local file: puts an optimistic card in the library **before it
+   * awaits anything** (so the UI reacts in milliseconds) and enriches it in
+   * the background.
+   *
    * @param file the file the user dropped or picked.
    * @param id the asset id (minted by the caller; `crypto.randomUUID`).
-   * @returns the loaded asset.
+   * @param name the library name (the file's own by default).
+   * @returns the enriched asset — never rejects, never hangs: a file whose
+   * metadata cannot be read keeps its card with provisional metadata.
    */
   async addMedia(file: File | Blob, id: string, name = file instanceof File ? file.name : id): Promise<MediaAsset> {
-    const decoder = new MediaDecoder(file, id, { fallback: this.fallback });
-    const info: MediaInfo = await decoder.init();
-    this.decoders.set(id, decoder);
+    const shell = this.assets.get(id) ?? this.registerShell(file, id, name);
+    const asset = await this.startEnrichment(id, file, shell);
+    return asset ?? this.assets.get(id) ?? shell;
+  }
 
-    let thumbnailUrl = '';
-    if (info.type !== 'audio') {
-      const key = file instanceof File ? thumbnailKey(file) : `${id}:${file.size}`;
-      const thumb = await generateThumbnail(
-        decoder,
-        Rational.approximate(info.duration.asNumber() / 2) ?? Rational.ZERO,
-        THUMB_WIDTH,
-        THUMB_HEIGHT,
-        this.thumbnailStore,
-        key,
-      );
-      if (thumb) {
-        thumbnailUrl = URL.createObjectURL(await bitmapToBlob(thumb));
-        thumb.close();
+  /**
+   * Imports a batch the way a drop or a file picker delivers it: every file
+   * that is media gets its card immediately (synchronously), the ones that
+   * are not are handed back for the caller to report.
+   *
+   * @param files the dropped or picked files.
+   * @returns the accepted cards, the rejected files and a `ready` promise.
+   */
+  addFiles(files: (File | Blob)[]): AddFilesResult {
+    const accepted: AcceptedFile[] = [];
+    const rejected: File[] = [];
+    const pending: Promise<MediaAsset | null>[] = [];
+    for (const file of files) {
+      const name = file instanceof File ? file.name : '';
+      if (file instanceof File && mediaKindOf(name, file.type) === null) {
+        rejected.push(file);
+        continue;
       }
+      const id = randomId();
+      const shell = this.registerShell(file, id, name === '' ? id : name);
+      accepted.push({ file, asset: shell });
+      pending.push(this.startEnrichment(id, file, shell));
     }
+    return {
+      accepted,
+      rejected,
+      ready: Promise.all(pending).then((assets) => assets.filter((asset): asset is MediaAsset => asset !== null)),
+    };
+  }
 
-    const asset: MediaAsset = {
+  /**
+   * Creates the optimistic card: id, name, kind by extension/MIME, size, a
+   * placeholder thumbnail and `status: 'processing'` — all synchronously.
+   * @param file the imported file.
+   * @param id the asset id.
+   * @param name the library name.
+   * @returns the shell, already in `listMedia()`.
+   */
+  private registerShell(file: File | Blob, id: string, name: string): MediaAsset {
+    const type = kindOf(file, name);
+    const shell: MediaAsset = {
       id,
       name,
-      type: info.type,
-      duration: info.duration,
-      width: info.width,
-      height: info.height,
-      fps: info.fps,
-      codec: info.videoCodec || info.audioCodec,
-      fileSize: info.fileSize,
-      thumbnailUrl,
+      type,
+      // Provisional values: the real ones arrive with the background probe.
+      duration: Rational.fromRatio(0, 1),
+      width: type === 'audio' ? 0 : PROBE_FALLBACK.width,
+      height: type === 'audio' ? 0 : PROBE_FALLBACK.height,
+      fps: FrameRate.THIRTY,
+      codec: '',
+      fileSize: file.size,
+      thumbnailUrl: placeholderThumbnail(type, name),
       opfsPath: `media/${id}`,
       importedAt: Date.now(),
       file,
+      status: 'processing',
+      statusMessage: null,
     };
-    this.assets.set(id, asset);
+    this.revisions.set(id, (this.revisionCounter += 1));
+    this.assets.set(id, shell);
+    console.info('[MediaImport] Archivo recibido:', name, `(${file.size} bytes)`);
+    console.info('[MediaImport] Asset optimista creado con ID:', id);
+    this.onMediaAdded?.(shell);
+    return shell;
+  }
+
+  /** Starts (or joins) the background import of an asset. */
+  private startEnrichment(id: string, file: File | Blob, shell: MediaAsset): Promise<MediaAsset | null> {
+    const inFlight = this.inFlight.get(id);
+    if (inFlight) return inFlight;
+    const revision = this.revisions.get(id) ?? 0;
+    const task = this.enrich(id, file, shell, revision);
+    this.inFlight.set(id, task);
+    void task.then(() => {
+      if (this.inFlight.get(id) === task) this.inFlight.delete(id);
+    });
+    return task;
+  }
+
+  /**
+   * The background half of an import: probe, thumbnail, publish. It has a
+   * hard deadline of its own (see {@link METADATA_PROBE_TIMEOUT_MS}); when
+   * the browser overruns it the asset is published with provisional
+   * metadata and the late answer is applied if it ever arrives.
+   */
+  private async enrich(id: string, file: File | Blob, shell: MediaAsset, revision: number): Promise<MediaAsset | null> {
+    const work = this.probeAndPublish(id, file, shell, revision);
+    const published = await withDeadline<MediaAsset | null | undefined>(
+      work,
+      this.probeTimeoutMs + ENRICHMENT_GRACE_MS,
+      undefined,
+    );
+    if (published) return published;
+    // Deadline exceeded: the card is already on screen with the shell's
+    // provisional values; give it the documented fallback metadata now and
+    // let a late answer upgrade it in place.
+    const provisional = await probeMediaMetadata(file, {
+      id,
+      type: shell.type,
+      timeoutMs: PROVISIONAL_PROBE_TIMEOUT_MS,
+    });
+    const asset = this.publish(
+      {
+        ...shell,
+        type: provisional.type,
+        duration: provisional.duration,
+        width: provisional.width,
+        height: provisional.height,
+        fps: provisional.fps,
+        status: 'error',
+        statusMessage: 'La sonda de metadatos no respondió a tiempo; se usan valores provisionales.',
+      },
+      revision,
+    );
+    void work.then((late) => {
+      if (late) console.info('[MediaImport] Metadatos actualizados OK (tarde):', id);
+    });
+    return asset ?? this.assets.get(id) ?? shell;
+  }
+
+  /**
+   * Probes the file, decodes its thumbnail and publishes the result —
+   * resolving with `null` when nothing usable could be read.
+   */
+  private async probeAndPublish(
+    id: string,
+    file: File | Blob,
+    shell: MediaAsset,
+    revision: number,
+  ): Promise<MediaAsset | null> {
+    let decoder: MediaDecoder | null = null;
+    let info: MediaInfo | null = null;
+    try {
+      decoder = new MediaDecoder(file, id, { fallback: this.fallback, probeTimeoutMs: this.probeTimeoutMs });
+      info = await decoder.init();
+    } catch (error) {
+      console.warn('[MediaImport] La sonda de metadatos falló:', shell.name, error);
+    }
+
+    if (info === null || isInconclusiveProbe(info)) {
+      // Nothing usable (unsupported codec, torn file, silent browser): the
+      // card stays, with provisional metadata and the placeholder thumbnail.
+      const provisional = await probeMediaMetadata(file, {
+        id,
+        type: shell.type,
+        timeoutMs: PROVISIONAL_PROBE_TIMEOUT_MS,
+      });
+      return this.publish(
+        {
+          ...shell,
+          type: provisional.type,
+          duration: provisional.duration,
+          width: provisional.width,
+          height: provisional.height,
+          fps: provisional.fps,
+          status: 'error',
+          statusMessage: 'No se pudieron leer los metadatos del archivo; se usan valores provisionales.',
+        },
+        revision,
+        // The element path may still play the file even when its metadata is
+        // unreadable, so keep the decoder when one could be built.
+        decoder,
+      );
+    }
+
+    const ready = info;
+    let thumbnailUrl = shell.thumbnailUrl;
+    if (ready.type !== 'audio' && decoder) {
+      thumbnailUrl = await this.thumbnailFor(id, file, decoder, ready, shell.thumbnailUrl);
+    }
+    const asset: MediaAsset = {
+      id,
+      name: shell.name,
+      type: ready.type,
+      duration: ready.duration,
+      width: ready.width,
+      height: ready.height,
+      fps: ready.fps,
+      codec: ready.videoCodec || ready.audioCodec,
+      fileSize: ready.fileSize,
+      thumbnailUrl,
+      opfsPath: shell.opfsPath,
+      importedAt: shell.importedAt,
+      file,
+      status: 'ready',
+      statusMessage: null,
+    };
+    console.info('[MediaImport] Metadatos actualizados OK:', shell.name, `${asset.width}×${asset.height}`);
+    return this.publish(asset, revision, decoder);
+  }
+
+  /** The real thumbnail, or the placeholder when the frame cannot be drawn. */
+  private async thumbnailFor(
+    id: string,
+    file: File | Blob,
+    decoder: MediaDecoder,
+    info: MediaInfo,
+    fallbackUrl: string,
+  ): Promise<string> {
+    try {
+      const key = file instanceof File ? thumbnailKey(file) : `${id}:${file.size}`;
+      const thumb = await withDeadline(
+        generateThumbnail(
+          decoder,
+          Rational.approximate(info.duration.asNumber() / 2) ?? Rational.ZERO,
+          THUMB_WIDTH,
+          THUMB_HEIGHT,
+          this.thumbnailStore,
+          key,
+        ),
+        this.probeTimeoutMs,
+        null,
+      );
+      if (!thumb) return fallbackUrl;
+      const url = URL.createObjectURL(await bitmapToBlob(thumb));
+      thumb.close();
+      if (fallbackUrl.startsWith('blob:')) URL.revokeObjectURL(fallbackUrl);
+      return url;
+    } catch (error) {
+      console.warn('[MediaImport] No se pudo generar la miniatura:', id, error);
+      return fallbackUrl;
+    }
+  }
+
+  /**
+   * Writes an asset into the library when it is still the current attempt
+   * (an asset removed or re-imported meanwhile keeps its newest state) and
+   * notifies the UI.
+   */
+  private publish(asset: MediaAsset, revision: number, decoder: MediaDecoder | null = null): MediaAsset | null {
+    if (this.revisions.get(asset.id) !== revision || !this.assets.has(asset.id)) {
+      if (decoder && this.decoders.get(asset.id) !== decoder) decoder.close();
+      return null;
+    }
+    if (decoder) {
+      const previous = this.decoders.get(asset.id);
+      if (previous && previous !== decoder) previous.close();
+      this.decoders.set(asset.id, decoder);
+    }
+    this.assets.set(asset.id, asset);
+    this.onMediaUpdated?.(asset);
     return asset;
   }
 
@@ -277,15 +652,22 @@ export class MediaPool implements FramePool {
     const next: MediaAsset = {
       ...asset,
       name: file instanceof File ? file.name : asset.name,
+      type: info.type,
       duration: info.duration,
       width: info.width,
       height: info.height,
       fps: info.fps,
       codec: info.videoCodec || info.audioCodec,
       fileSize: info.fileSize,
+      status: 'ready',
+      statusMessage: null,
       file,
     };
+    // The relinked source wins over any probe still running for the old one.
+    this.revisions.set(id, (this.revisionCounter += 1));
+    this.inFlight.delete(id);
     this.assets.set(id, next);
+    this.onMediaUpdated?.(next);
     return next;
   }
 
@@ -337,16 +719,21 @@ export class MediaPool implements FramePool {
   removeMedia(id: string): void {
     const asset = this.assets.get(id);
     if (!asset) return;
-    if (asset.thumbnailUrl !== '') URL.revokeObjectURL(asset.thumbnailUrl);
+    if (asset.thumbnailUrl.startsWith('blob:')) URL.revokeObjectURL(asset.thumbnailUrl);
     this.decoders.get(id)?.close();
     this.decoders.delete(id);
     this.detachProxy(id);
     this.assets.delete(id);
+    // A background probe still running for this id must not resurrect it.
+    this.revisions.delete(id);
+    this.inFlight.delete(id);
   }
 
   /** Frees every decoder, frame and URL. */
   destroy(): void {
     for (const id of [...this.assets.keys()]) this.removeMedia(id);
+    this.inFlight.clear();
+    this.revisions.clear();
   }
 }
 

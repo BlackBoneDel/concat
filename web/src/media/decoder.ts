@@ -44,6 +44,37 @@ export interface MediaFallback {
 export interface MediaDecoderOptions {
   /** FFmpeg fallback used only when the native paths fail. */
   fallback?: MediaFallback | null;
+  /** Strict deadline of the element probe, in ms (default {@link METADATA_PROBE_TIMEOUT_MS}). */
+  probeTimeoutMs?: number;
+}
+
+/**
+ * The strict deadline every metadata probe answers within, in milliseconds.
+ *
+ * A `<video>` pointing at an MP4 with a trailing `moov` atom, an unusual
+ * audio codec or a container the browser half-understands can stay silent
+ * forever: neither `loadedmetadata` nor `error` ever fires and the import
+ * promise hangs, which is what made the media panel look "dead". Two seconds
+ * is long enough for any local file to answer and short enough that the user
+ * never waits on a hung probe.
+ */
+export const METADATA_PROBE_TIMEOUT_MS = 2000;
+
+/**
+ * The provisional metadata of a file nothing could be read from: ten seconds
+ * and 1920×1080. The card stays in the library (import must never lose the
+ * user's file) with these values until something better can be probed.
+ */
+export const PROBE_FALLBACK = Object.freeze({ durationSeconds: 10, width: 1920, height: 1080 });
+
+/** What an element probe found out (and whether the browser ever answered). */
+export interface ElementProbe {
+  width: number;
+  height: number;
+  duration: number;
+  fps: FrameRate | null;
+  /** `true` when the file never answered and the values above are empty. */
+  timedOut: boolean;
 }
 
 /** Everything a probe found out about a file. */
@@ -93,6 +124,8 @@ export class MediaDecoder {
   private closed = false;
   private serial: Promise<unknown> = Promise.resolve();
   private readonly fallback: MediaFallback | null;
+  /** Strict deadline of the element probe (see {@link METADATA_PROBE_TIMEOUT_MS}). */
+  private readonly probeTimeoutMs: number;
   /** The blob the fallback `<video>` element plays (the original or a conformed copy). */
   private playable: Blob | null = null;
   private conforming: Promise<Blob | null> | null = null;
@@ -106,6 +139,7 @@ export class MediaDecoder {
     this.file = file;
     this.id = id;
     this.fallback = options.fallback ?? null;
+    this.probeTimeoutMs = options.probeTimeoutMs ?? METADATA_PROBE_TIMEOUT_MS;
   }
 
   /**
@@ -165,7 +199,7 @@ export class MediaDecoder {
       fps = FrameRate.THIRTY;
     } else if (durationSeconds === 0) {
       // Probe duration through a media element (webm, wav, mp3, ...).
-      const probe = await probeElement(this.file, type);
+      const probe = await probeElement(this.file, type, this.probeTimeoutMs);
       width = probe.width || width;
       height = probe.height || height;
       durationSeconds = probe.duration || durationSeconds;
@@ -719,30 +753,96 @@ export function revealDuration(element: DurationProbeElement, timeoutMs = 2500):
   });
 }
 
-/** Element probe for containers without a demuxer: size, duration, rate. */
-async function probeElement(
+/**
+ * Runs `task` under a strict deadline.
+ *
+ * The task keeps running (there is no way to cancel a pending media element),
+ * but the caller is released with `fallback`, so nothing user-facing ever
+ * waits on a browser that stopped answering.
+ * @param task the (never-ending, in the bad case) work.
+ * @param timeoutMs the deadline.
+ * @param fallback what to resolve with when the deadline wins.
+ * @returns the task's value, or the fallback.
+ */
+export function withDeadline<T>(task: Promise<T>, timeoutMs: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const finish = (value: T): void => {
+      if (settled) return;
+      settled = true;
+      globalThis.clearTimeout(timer);
+      resolve(value);
+    };
+    const timer = globalThis.setTimeout(() => finish(fallback), Math.max(0, timeoutMs));
+    task.then(finish, () => finish(fallback));
+  });
+}
+
+/** Releases a media element: stop buffering, drop the source, free the URL. */
+function releaseElement(element: HTMLMediaElement, url: string): void {
+  try {
+    // Dropping the source is the documented way to abort the load; without
+    // it a hung element keeps decoding (and holding memory) for the tab's life.
+    element.removeAttribute('src');
+    element.load();
+  } catch {
+    // Elements that never attached to a document may refuse `load()`.
+  }
+  URL.revokeObjectURL(url);
+}
+
+/**
+ * Element probe for containers without a demuxer: size, duration, rate.
+ *
+ * Guaranteed to answer: `loadedmetadata` and `error` both settle it, and a
+ * strict timer settles it when the browser does neither (see
+ * {@link METADATA_PROBE_TIMEOUT_MS}). The element is released afterwards, so
+ * a file that never answers does not keep the decoder busy.
+ * @param file the local file.
+ * @param type the kind the container detection guessed.
+ * @param timeoutMs strict deadline (2 s by default).
+ * @returns the probed values (zeros with `timedOut: true` when nothing came).
+ */
+export async function probeElement(
   file: File | Blob,
   type: 'video' | 'audio' | 'image',
-): Promise<{ width: number; height: number; duration: number; fps: FrameRate | null }> {
-  if (typeof document === 'undefined' || type === 'image' || typeof URL.createObjectURL !== 'function') {
-    return { width: 0, height: 0, duration: 0, fps: null };
-  }
+  timeoutMs = METADATA_PROBE_TIMEOUT_MS,
+): Promise<ElementProbe> {
+  const empty: ElementProbe = { width: 0, height: 0, duration: 0, fps: null, timedOut: false };
+  if (typeof document === 'undefined' || type === 'image' || typeof URL.createObjectURL !== 'function') return empty;
   const url = URL.createObjectURL(file);
+  let element: HTMLVideoElement | HTMLAudioElement;
   try {
-    const element = document.createElement(type === 'audio' ? 'audio' : 'video');
+    element = document.createElement(type === 'audio' ? 'audio' : 'video');
+  } catch {
+    // A document that refuses to build a media element cannot be probed.
+    URL.revokeObjectURL(url);
+    return { ...empty, timedOut: true };
+  }
+  try {
     element.preload = 'metadata';
     element.src = url;
-    await new Promise<void>((resolve) => {
-      const done = () => {
-        element.removeEventListener('loadedmetadata', done);
-        resolve();
+    const answered = await new Promise<boolean>((resolve) => {
+      let settled = false;
+      const finish = (value: boolean): void => {
+        if (settled) return;
+        settled = true;
+        element.removeEventListener('loadedmetadata', onLoaded);
+        element.removeEventListener('error', onError);
+        globalThis.clearTimeout(timer);
+        resolve(value);
       };
-      element.addEventListener('loadedmetadata', done);
-      globalThis.setTimeout(done, 3000);
+      const onLoaded = (): void => finish(true);
+      const onError = (): void => finish(false);
+      const timer = globalThis.setTimeout(() => finish(false), Math.max(0, timeoutMs));
+      element.addEventListener('loadedmetadata', onLoaded);
+      element.addEventListener('error', onError);
     });
+    if (!answered) return { ...empty, timedOut: true };
     // Fase 7+: OBS/stream-shaped files answer `Infinity` (or `NaN`) here —
     // reveal the real duration with the seek-to-the-end trick instead of
-    // importing a 0-second asset.
+    // importing a 0-second asset. That trick has its own 2.5 s budget; the
+    // whole probe stays under control because nothing awaits it forever.
     let duration = finiteDuration(element.duration);
     if (duration === 0 && !Number.isFinite(element.duration)) {
       duration = await revealDuration(element as unknown as DurationProbeElement);
@@ -752,8 +852,66 @@ async function probeElement(
       height: 'videoHeight' in element ? element.videoHeight : 0,
       duration,
       fps: null,
+      timedOut: false,
     };
+  } catch {
+    // A document that refuses to build a media element cannot be probed:
+    // answer with the empty probe instead of throwing at the caller.
+    return { ...empty, timedOut: true };
   } finally {
-    URL.revokeObjectURL(url);
+    releaseElement(element, url);
   }
+}
+
+/** Options of {@link probeMediaMetadata}. */
+export interface MediaProbeOptions {
+  /** Asset id to carry in the returned {@link MediaInfo} (default `probe`). */
+  id?: string;
+  /** Kind to assume when nothing can be probed (`video` by default). */
+  type?: 'video' | 'audio' | 'image';
+  /** Strict deadline, in ms. */
+  timeoutMs?: number;
+}
+
+/**
+ * Probes a local file's metadata and **never** hangs, never rejects.
+ *
+ * This is the probe the import flow leans on: it races the element probe
+ * against a strict deadline and answers with the documented fallback
+ * (10 s, 1920×1080) when the browser stays silent, so an import can always
+ * show a card with sane provisional values. Callers that need the codec
+ * level detail of `MediaDecoder.init` still get it from there — this one is
+ * about never leaving the UI without an answer.
+ *
+ * @param file the local file.
+ * @param options id, assumed kind and deadline.
+ * @returns a complete {@link MediaInfo} (provisional when nothing answered).
+ */
+export async function probeMediaMetadata(file: File | Blob, options: MediaProbeOptions = {}): Promise<MediaInfo> {
+  const id = options.id ?? 'probe';
+  const assumed = options.type ?? 'video';
+  const timeoutMs = options.timeoutMs ?? METADATA_PROBE_TIMEOUT_MS;
+  let probe: ElementProbe | null = null;
+  try {
+    probe = await withDeadline(probeElement(file, assumed, timeoutMs), Math.max(0, timeoutMs), null);
+  } catch (error) {
+    console.warn('[DecoderProbe] La sonda de metadatos falló, se usan valores provisionales:', error);
+  }
+  const answered = probe !== null && !probe.timedOut ? probe : null;
+  const type = answered && answered.width > 0 ? 'video' : assumed;
+  const seconds = answered && answered.duration > 0 ? answered.duration : PROBE_FALLBACK.durationSeconds;
+  return {
+    id,
+    type,
+    duration: Rational.approximate(seconds) ?? Rational.ZERO,
+    width: answered && answered.width > 0 ? answered.width : type === 'audio' ? 0 : PROBE_FALLBACK.width,
+    height: answered && answered.height > 0 ? answered.height : type === 'audio' ? 0 : PROBE_FALLBACK.height,
+    fps: (answered && answered.fps) || FrameRate.THIRTY,
+    videoCodec: '',
+    audioCodec: '',
+    audioSampleRate: 0,
+    audioChannels: 0,
+    fileSize: file.size,
+    container: 'unknown',
+  };
 }

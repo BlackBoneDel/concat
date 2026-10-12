@@ -121,6 +121,48 @@ Tests nuevos:
 | Tests | 845 / 89 archivos (799 previos intactos salvo 1 selector de DOM) |
 | Bundle principal | 158,94 KB gzip (< 180 KB) |
 
+## Import bulletproofing (Fase 7+) — cualquier archivo entra al instante
+
+Los reportes de producción («arrastro un MP4 y no pasa nada», «pulso
+Importar y no se abre nada», «el navegador se va a la URL del archivo»)
+tenían cinco causas distintas, cada una con su parche:
+
+| Causa | Parche | Módulo |
+|---|---|---|
+| El navegador solo acepta un `drop` si `dragenter`/`dragover` se cancelaron antes; fuera de los paneles la página navegaba al archivo | Captura global en `window` **y** `document`: los cuatro eventos de arrastre hacen siempre `preventDefault`, `dragover` ofrece `copy` y un drop con archivos va al importador **una sola vez** (los paneles marcan el drop que ya consumieron con `markDropHandled`); mientras el arrastre trae archivos, `<html>` lleva `.window-drag-over` con el aviso «Suelta los archivos para importarlos» | `src/ui/global-drop.ts` |
+| Un `<input type="file">` creado al vuelo y nunca añadido al DOM no dispara `change` en varios navegadores móviles y WebViews | Un único input `#concat-global-file-input` adjunto a `document.body` (fuera de pantalla pero real); `change` limpia `value` —permite reelegir el mismo archivo— y todos los botones «Importar medios»/«+» (panel, menú Archivo, botón de cabecera, Ctrl+I) abren ese picker con `openGlobalFilePicker()` | `src/ui/global-file-input.ts` |
+| La tarjeta no aparecía hasta terminar miniatura y sonda: el usuario lo leía como «no hace nada» | Importación optimista: `MediaPool.addFiles()` registra el asset **sincrónicamente** (UUID, nombre, tipo por MIME/extensión, `fileSize`, `duration: Rational.fromRatio(0, 1)`, 1920×1080, miniatura SVG de reserva con el nombre, `status: 'processing'`) y notifica `onMediaAdded`; la sonda, la miniatura real y `status: 'ready'` llegan en segundo plano por `onMediaUpdated` | `src/media/media-pool.ts` |
+| `loadedmetadata`/`error` que nunca llegan en ciertos MP4 (index `moov` al final, códecs raros) | Sonda con deadline estricto de 2 s (`METADATA_PROBE_TIMEOUT_MS`): `probeElement` resuelve con `timedOut` y libera el elemento (`src` fuera, `load()`, `revokeObjectURL`); `probeMediaMetadata` no cuelga ni rechaza nunca y devuelve el fallback documentado (10 s, 1920×1080). Un archivo ilegible **se queda** en la biblioteca con `status: 'error'` y su miniatura de reserva | `src/media/decoder.ts` |
+| Un service worker que responde a `blob:`/`data:` rompe miniaturas y `createObjectURL` (CORS/esquemas locales) | Guarda al principio del `fetch`: `blob:`, `data:`, `file:` y `chrome-extension:` vuelven al navegador sin tocar la caché; solo `http(s)` del propio origen pasa a `networkFirst` | `public/sw.js` |
+
+Además:
+
+- Un archivo que no es audio, vídeo o imagen (`.exe`, `.zip`, sin extensión)
+  avisa con un toast —«El archivo '…' no es un medio de audio, video o
+  imagen válido.»— y no entra en la biblioteca (`mediaKindOf`).
+- La tarjeta muestra un spinner («Procesando…») mientras dura la sonda y una
+  nota de «Metadatos provisionales» si no se pudo leer nada.
+- El elemento de la biblioteca y el ítem del *bin* se crean aunque falle la
+  escritura en OPFS: guardar los bytes es best-effort, perder el archivo no.
+- Trazas en consola con cada paso: `[MediaImport] Archivo recibido: …`,
+  `[MediaImport] Asset optimista creado con ID: …`, `[MediaImport] OPFS
+  guardado OK`, `[MediaImport] Metadatos actualizados OK`, `[GlobalDrop]
+  Archivos detectados: N`, `[FileInput] Archivos seleccionados: N`.
+
+### Tests del import bulletproof
+
+`tests/import-flow-bulletproof.test.ts` (21): tarjeta en < 10 ms antes de
+que la sonda termine, rechazo de lo que no es medio, drop global capturado
+exactamente una vez (y nunca para drags internos o drops ya consumidos),
+overlay de arrastre, elemento silencioso que solo resuelve por timeout con el
+fallback 10 s/1920×1080, el medio que sigue en la biblioteca tras el fallo,
+input adjunto al DOM con `value` limpio y guarda `blob:`/`data:` del service
+worker, más los dos flujos de la app montada (drop sobre `body` y toast de
+archivo incompatible).
+
+Suite completa: **913 tests / 90 archivos** (`npm test`) y `npm run build`
+sin errores de TypeScript.
+
 ## Fase 6 — exportación offline, PWA instalable y pulido de producción
 
 Concat exporta en el propio navegador: no sube nada a ningún servidor.
@@ -390,7 +432,9 @@ In the running app, all offline:
 
 1. The complete layout renders — header, media panel, preview, inspector,
    timeline; drag the panel edges to resize.
-2. Drop an MP4 on the media panel (or `+ Importar`) — its thumbnail appears.
+2. Drop an MP4 anywhere in the window (panel, preview, header — the whole
+   page accepts it) or use `+ Importar` / the header's `+` button: the card
+   appears at once with a spinner, then its thumbnail and duration.
 3. Double-click the item — a clip lands on the timeline at the playhead.
 4. Press Space (or ▶) — the video plays on the preview canvas.
 5. Press Space again — it pauses where it stands.

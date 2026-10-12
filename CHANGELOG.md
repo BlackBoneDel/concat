@@ -7,6 +7,30 @@ for the tag being released, and falls back to the commit subjects for a
 release that has none. Releases before 0.2.5 have their notes on the
 releases page only: https://github.com/jub0t/Concat/releases
 
+## Unreleased
+
+### Importing media
+
+- Drop a video anywhere on the editor — the panel, the preview, the header,
+  the page itself — and it is imported. The browser no longer navigates to
+  the raw file when a drop lands outside a panel.
+- The library card appears the instant the file is dropped, with a spinner
+  while the file is being read, instead of nothing happening until the
+  browser finished with it.
+- A file whose metadata never answers — an MP4 with its index at the end, an
+  unusual codec, a torn download — no longer leaves the import hanging: it
+  lands in the library with a provisional ten-second, 1080p card and its real
+  duration and thumbnail are filled in if they ever arrive. The file is never
+  dropped from the library and the import never throws.
+- A file that is not audio, video or image (a `.exe`, a `.zip`) says so with
+  a warning toast instead of sitting silently in the library.
+- Every "import media" button — the panel's, the File menu's, the header's
+  new `+` — opens the same picker, and that picker lives in the page: it is
+  the one that used to do nothing on some phones and WebViews.
+- The service worker leaves `blob:`, `data:` and `file:` requests to the
+  browser, so thumbnails, decoded previews and the local schemes the import
+  builds are never intercepted.
+
 ## 0.2.6 — 2026-10-04
 
 A release for the hands. The timeline gains a razor, a scrollbar and a

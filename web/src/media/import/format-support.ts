@@ -87,6 +87,31 @@ export function kindByExtension(name: string): 'video' | 'audio' | 'image' | 'su
   return 'other';
 }
 
+/** The media kinds the library imports (everything else is not media). */
+export type ImportMediaKind = 'video' | 'audio' | 'image';
+
+/**
+ * The media kind a file claims to be, so an import can show the card before
+ * the browser has probed anything.
+ *
+ * The MIME type wins when the browser reports one (`video/…`, `audio/…`,
+ * `image/…`); `application/octet-stream` and the empty string — what most
+ * systems hand over for `.mov`, `.mkv`, `.mts` — fall through to the
+ * extension. Anything unknown (`.exe`, `.zip`, …) is not media and the
+ * import refuses it with a visible warning instead of a card that never
+ * decodes.
+ *
+ * @param name the file name.
+ * @param mime the `File.type` (optional).
+ * @returns the kind, or `null` when the file is not importable media.
+ */
+export function mediaKindOf(name: string, mime = ''): ImportMediaKind | null {
+  const byMime = /^\s*(video|audio|image)\//.exec(mime.toLowerCase())?.[1];
+  if (byMime === 'video' || byMime === 'audio' || byMime === 'image') return byMime;
+  const kind = kindByExtension(name);
+  return kind === 'video' || kind === 'audio' || kind === 'image' ? kind : null;
+}
+
 /**
  * Lowercase extension without the dot.
  * @param name a file name.
