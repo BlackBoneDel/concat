@@ -116,6 +116,24 @@ export function setDefaultAudioFxResolver(resolver: AudioFxResolver | null): voi
   defaultFxResolver = resolver;
 }
 
+// Fase 5 hook: taps on the master bus (the stereo VU meter's splitter +
+// analysers). Each listener receives the master gain of every new mixer and
+// of the live ones at install time.
+type MasterTap = (master: GainLike, context: AudioGraphContext) => void;
+const masterTaps = new Set<MasterTap>();
+const liveMasters: { master: GainLike; context: AudioGraphContext }[] = [];
+
+/**
+ * Fase 5 hook: observes the master bus of every mixer (post-fader).
+ * @param tap called with the master gain node and its context.
+ * @returns unsubscribe.
+ */
+export function addMasterTap(tap: MasterTap): () => void {
+  masterTaps.add(tap);
+  for (const live of liveMasters) tap(live.master, live.context);
+  return () => masterTaps.delete(tap);
+}
+
 /** A scheduled clip and its live nodes. */
 interface ScheduledSource {
   key: string;
@@ -150,6 +168,10 @@ export class AudioMixer {
     this.master.connect(this.analyser);
     this.analyser.connect(context.destination);
     this.levelBuffer = new Float32Array(this.analyser.fftSize);
+    // Fase 5 hook: let master taps (stereo VU) attach to this bus.
+    liveMasters.push({ master: this.master, context });
+    if (liveMasters.length > 4) liveMasters.shift();
+    for (const tap of masterTaps) tap(this.master, context);
   }
 
   /**

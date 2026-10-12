@@ -97,3 +97,9 @@ export { colorGradingSection } from './color-grading-section.ts';
 export { audioFxSection } from './audio-fx-section.ts';
 export { subtitlesSection } from './subtitles-section.ts';
 export { editEffects, type EffectSectionHost } from './effect-host.ts';
+// Fase 5
+export { BezierEditor, BEZIER_CANVAS_SIZE, BEZIER_PRESET_BUTTONS, canvasToCurve, curveToCanvas, moveHandle, nearestHandle } from './bezier-editor.ts';
+export { keyframeCurveSection, type KeyframeCurveHost } from './keyframe-curve-section.ts';
+export { dropIndex, effectsStackSection, slotToIndex, type EffectsStackHost } from './effects-stack-section.ts';
+export { SYSTEM_FONT_FAMILIES, textAdvancedSection, toHexColor, withAlphaOf, type TextAdvancedHost } from './text-advanced-section.ts';
+export { compatibleTypes, PRESET_TYPE_LABELS, presetsSection, type PresetsHost } from './presets-section.ts';

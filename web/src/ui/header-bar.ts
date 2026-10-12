@@ -283,6 +283,16 @@ export class HeaderBar {
   private undo(): void {
     const restored = this.ctx.history.undo(this.ctx.session.document, this.ctx.session.documentSettings());
     if (!restored) {
+      // Fase 5: inspector/timeline edits live in the edit session's history
+      // (the same one Ctrl+Z drives from the timeline).
+      const session = this.ctx.editSession;
+      if (session?.history.canUndo()) {
+        session.undo();
+        this.ctx.requestRender();
+        document.dispatchEvent(new CustomEvent('timeline-changed'));
+        document.dispatchEvent(new CustomEvent('selection-changed'));
+        return;
+      }
       this.ctx.notifications.info('Nada que deshacer');
       return;
     }
@@ -297,6 +307,16 @@ export class HeaderBar {
   private redo(): void {
     const restored = this.ctx.history.redo(this.ctx.session.document, this.ctx.session.documentSettings());
     if (!restored) {
+      // Fase 5: inspector/timeline edits live in the edit session's history
+      // (the same one Ctrl+Z drives from the timeline).
+      const session = this.ctx.editSession;
+      if (session?.history.canRedo()) {
+        session.redo();
+        this.ctx.requestRender();
+        document.dispatchEvent(new CustomEvent('timeline-changed'));
+        document.dispatchEvent(new CustomEvent('selection-changed'));
+        return;
+      }
       this.ctx.notifications.info('Nada que rehacer');
       return;
     }

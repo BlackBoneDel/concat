@@ -44,6 +44,8 @@ export interface TrackLayout {
   height: number;
   /** Whether the track is drawn flat (collapsed). */
   collapsed: boolean;
+  /** Fase 5: px at the bottom of the track for expanded keyframe lanes (included in `height`). */
+  keyframeLane?: number;
 }
 
 /** Visual-only state of a drag in progress (document untouched). */

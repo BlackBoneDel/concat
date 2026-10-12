@@ -17,6 +17,8 @@ import type { Crop, ShapeStyle } from '../model/index.ts';
 import { EditorClip } from '../session/editor-clip.ts';
 import { applyBlend, resetBlend } from './blend.ts';
 import { renderTextClip } from './text-renderer.ts';
+import { getTextEngineHook, renderAdvancedText } from './text-engine.ts';
+import { getVideoEffectsHook } from './video-effects-hook.ts';
 import { applyTransform, fitRect } from './transform.ts';
 import { intrinsicSize } from './types.ts';
 import { getVisionHook } from './vision-pipeline.ts';
@@ -104,7 +106,16 @@ async function drawClip(
     if (!editor?.text) return;
     applyBlend(ctx, clip.blend, opacity);
     applyTransform(ctx, transform, frameWidth, frameHeight, frameWidth, frameHeight);
-    renderTextClip(ctx, editor.text, frameWidth, frameHeight);
+    // Fase 5 hook: advanced titling (plate, shadow, gradient, typewriter).
+    const advanced = getTextEngineHook()?.resolve(clip) ?? null;
+    if (advanced) {
+      renderAdvancedText(ctx, editor.text, advanced.advanced, frameWidth, frameHeight, {
+        localTime: time.asNumber() - clip.start.asNumber(),
+        fontFamily: advanced.fontFamily,
+      });
+    } else {
+      renderTextClip(ctx, editor.text, frameWidth, frameHeight);
+    }
     ctx.restore();
     resetBlend(ctx);
     return;
@@ -130,9 +141,6 @@ async function drawClip(
   const intrinsic = intrinsicSize(source);
   const sourceWidth = size?.width ?? intrinsic.width;
   const sourceHeight = size?.height ?? intrinsic.height;
-  // Fase 4 hook: picture effects (keys, grade, LUT) before blend/transform.
-  const picture = getVisionHook()?.process(clip, source, sourceWidth, sourceHeight) ?? source;
-
   // Crop takes fractions off each edge *before* fitting: the picture that is
   // fitted and placed is the cropped source.
   const crop = editor?.crop ?? null;
@@ -140,10 +148,28 @@ async function drawClip(
   const top = crop ? Math.min(0.9, Math.max(0, crop.top)) : 0;
   const right = crop ? Math.min(0.9, Math.max(0, crop.right)) : 0;
   const bottom = crop ? Math.min(0.9, Math.max(0, crop.bottom)) : 0;
-  const sx = sourceWidth * left;
-  const sy = sourceHeight * top;
+  let sx = sourceWidth * left;
+  let sy = sourceHeight * top;
   const sw = Math.max(1, sourceWidth * (1 - left - right));
   const sh = Math.max(1, sourceHeight * (1 - top - bottom));
+
+  const vision = getVisionHook();
+  // Fase 5 hook: Source → Crop → Chroma (F4) → EffectsStack → ColorGrading (F4)
+  // → Transform → Blend/Opacity. Without a stack this is the Fase 4 path.
+  const effectsHook = getVideoEffectsHook();
+  const stack = effectsHook?.resolve(clip) ?? null;
+  let picture: RenderImage | null = null;
+  if (effectsHook && stack && stack.length > 0) {
+    const keyed = vision?.process(clip, source, sourceWidth, sourceHeight, 'key') ?? source;
+    const stacked = effectsHook.apply(keyed, { sx, sy, sw, sh }, stack, time.asNumber() - clip.start.asNumber());
+    if (stacked) {
+      picture = vision?.process(clip, stacked, sw, sh, 'grade') ?? stacked;
+      sx = 0;
+      sy = 0;
+    }
+  }
+  // Fase 4 hook: picture effects (keys, grade, LUT) before blend/transform.
+  picture ??= vision?.process(clip, source, sourceWidth, sourceHeight) ?? source;
 
   applyBlend(ctx, clip.blend, opacity);
   applyTransform(ctx, transform, sw, sh, frameWidth, frameHeight);

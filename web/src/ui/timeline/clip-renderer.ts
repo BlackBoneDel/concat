@@ -28,10 +28,24 @@ export interface DrawClipsContext {
   waveform: WaveformRenderer;
   thumbnails: ThumbnailRenderer;
   preview: ClipDragPreview | null;
+  /** Fase 5: clips with an open keyframe lane (button shows ⏶). */
+  expanded?: ReadonlySet<string>;
 }
 
 /** Padding inside a clip face. */
-const FACE_PADDING = 4;
+export const FACE_PADDING = 4;
+
+/**
+ * Fase 5: the "⏷" keyframe-lane button of a clip face.
+ * @param x face x.
+ * @param y face y.
+ * @param w face width.
+ * @returns the button rectangle, or `null` when the face is too narrow.
+ */
+export function expandButtonRect(x: number, y: number, w: number): { x: number; y: number; w: number; h: number } | null {
+  if (w < 44) return null;
+  return { x: x + w - 20, y: y + 2, w: 16, h: 14 };
+}
 
 /**
  * Paints every visible clip.
@@ -54,7 +68,8 @@ export function drawClips(ctx: CanvasRenderingContext2D, context: DrawClipsConte
     const w = drawDuration * viewport.pixelsPerSecond;
     if (x > width || x + w < 0) continue;
     const y = layout.y - viewport.scrollTop + FACE_PADDING;
-    const h = layout.height - FACE_PADDING * 2;
+    // Fase 5: the keyframe lane band sits below the faces.
+    const h = layout.height - (layout.keyframeLane ?? 0) - FACE_PADDING * 2;
     if (y > height || y + h < 0) continue;
     drawClipFace(ctx, clip, x, y, Math.max(2, w), h, context);
   }
@@ -105,7 +120,24 @@ function drawClipFace(
   ctx.font = '600 11px system-ui, sans-serif';
   ctx.textBaseline = 'top';
   const name = clip.name === '' ? clip.id : clip.name;
-  ctx.fillText(name, x + 8, y + 3, Math.max(10, w - 16));
+  const button = expandButtonRect(x, y, w);
+  ctx.fillText(name, x + 8, y + 3, Math.max(10, w - 16 - (button ? 20 : 0)));
+  if (button) {
+    // Fase 5: keyframe lane toggle; a dot marks clips that have keys.
+    const open = context.expanded?.has(clip.id) === true;
+    ctx.fillStyle = open ? 'rgba(255,255,255,0.35)' : 'rgba(0,0,0,0.3)';
+    ctx.fillRect(button.x, button.y, button.w, button.h);
+    ctx.fillStyle = '#ffffff';
+    ctx.font = '700 10px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(open ? '⏶' : '⏷', button.x + button.w / 2, button.y + 1);
+    ctx.textAlign = 'left';
+    if (clip.keys.length > 0 && !open) {
+      ctx.beginPath();
+      ctx.arc(button.x - 4, button.y + button.h / 2, 2, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
   if (missing) {
     ctx.fillStyle = '#ffffff';
     ctx.font = '700 10px system-ui, sans-serif';

@@ -77,3 +77,40 @@ export {
   type SnapCandidate,
   type SnapResult,
 } from './snapping.ts';
+
+// Fase 5: effect stacks, advanced titling, keyframe curves.
+export {
+  AddAudioEffectOperation,
+  AddVideoEffectOperation,
+  RemoveAudioEffectOperation,
+  RemoveVideoEffectOperation,
+  ReorderAudioEffectsOperation,
+  ReorderVideoEffectsOperation,
+  ToggleEffectOperation,
+  UpdateEffectParamOperation,
+  clipStackOf,
+  locateEffect,
+  withStack,
+} from './effects-operations.ts';
+export {
+  AddCustomFontOperation,
+  RemoveCustomFontOperation,
+  RestoreTextOperation,
+  UpdateTextStylesOperation,
+  projectFonts,
+  type TextStylePatch,
+  type TextStylesChange,
+} from './text-operations.ts';
+export {
+  BEZIER_PRESETS,
+  BEZIER_Y_LIMIT,
+  KEYFRAME_VALUE_RANGES,
+  MoveKeyframeValueOperation,
+  UpdateKeyframeCurveOperation,
+  clampBezier,
+  evaluateBezier,
+  percentToValue,
+  presetOf,
+  valueToPercent,
+  type CubicBezier,
+} from './keyframe-operations.ts';

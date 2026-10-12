@@ -44,7 +44,12 @@ import { buildSubtitleImport } from '../media/subtitles/subtitle-to-clips.ts';
 import { SUBTITLE_KEY, clipsToSubtitles, toSRT, toVTT } from '../media/subtitles/subtitle-writer.ts';
 import type { MediaTools, ProxyState } from '../ui/media-tools.ts';
 import type { Notifications } from '../ui/notifications.ts';
-import { openBulkImportModal, openLutBrowser, openProxyModal, openRelinkModal, type ProxyAssetInfo, type ProxyModalSource } from '../ui/modals/index.ts';
+import type { ProxyAssetInfo, ProxyModalSource } from '../ui/modals/index.ts';
+// Fase 5: dialogs load on first use (their own chunks keep the main bundle small).
+const loadLutBrowser = () => import('../ui/modals/lut-browser.ts');
+const loadProxyModal = () => import('../ui/modals/proxy-modal.ts');
+const loadRelinkModal = () => import('../ui/modals/relink-modal.ts');
+const loadBulkImportModal = () => import('../ui/modals/bulk-import-modal.ts');
 
 /** localStorage key of the proxy playback toggle. */
 const PROXY_PREF_KEY = 'concat.useProxies';
@@ -178,12 +183,12 @@ export class MediaToolkit implements MediaTools {
   }
 
   browseLuts(currentId: string | null): Promise<Lut3D | null> {
-    return openLutBrowser({
+    return loadLutBrowser().then(({ openLutBrowser }) => openLutBrowser({
       luts: this.luts.list(),
       currentId,
       importLut: (file) => this.importLut(file),
       render: (pixels, width, height, lut) => this.vision.process(pixels, width, height, { ...emptyClipEffects(), lut: { id: lut.id, strength: 1 } }, lut),
-    });
+    }));
   }
 
   async importLut(file: File): Promise<Lut3D | null> {
@@ -251,7 +256,9 @@ export class MediaToolkit implements MediaTools {
   }
 
   openProxyManager(): void {
-    void openProxyModal(this.proxySource());
+    void loadProxyModal()
+      .then(({ openProxyModal }) => openProxyModal(this.proxySource()))
+      .catch((error: unknown) => this.notify('error', 'Proxies', describe(error)));
   }
 
   async clearProxies(): Promise<void> {
@@ -323,6 +330,7 @@ export class MediaToolkit implements MediaTools {
         this.notify('info', 'Medio disponible', 'Este medio ya está en el almacenamiento local.');
         return;
       }
+      const { openRelinkModal } = await loadRelinkModal();
       await openRelinkModal({
         missing,
         relinker: this.relinker,
@@ -330,7 +338,7 @@ export class MediaToolkit implements MediaTools {
         apply: (assignments) => this.applyRelink(assignments),
         onError: (error) => this.notify('error', 'Error al volver a vincular', describe(error)),
       });
-    })();
+    })().catch((error: unknown) => this.notify('error', 'Error al volver a vincular', describe(error)));
   }
 
   /**
@@ -367,7 +375,7 @@ export class MediaToolkit implements MediaTools {
   }
 
   importFolder(): void {
-    void openBulkImportModal<MediaItem>({
+    void loadBulkImportModal().then(({ openBulkImportModal }) => openBulkImportModal<MediaItem>({
       scanner: this.scanner,
       importOne: ({ file }) => this.host.importOne(file),
       classify: (item) => ({ kind: item.kind, width: item.width ?? 0, height: item.height ?? 0 }),
@@ -377,7 +385,7 @@ export class MediaToolkit implements MediaTools {
         const kind = summary.failed > 0 ? 'warning' : 'success';
         this.notify(kind, 'Importación terminada', `${summary.completed} importado(s)${summary.failed ? `, ${summary.failed} con error` : ''}${summary.cancelled ? ' (cancelada)' : ''}.`);
       },
-    });
+    })).catch((error: unknown) => this.notify('error', 'Importar carpeta', describe(error)));
   }
 
   /**

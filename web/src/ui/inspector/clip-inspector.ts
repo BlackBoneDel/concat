@@ -33,6 +33,14 @@ import { audioFxSection } from './audio-fx-section.ts';
 import { chromaKeySection } from './chroma-key-section.ts';
 import { colorGradingSection } from './color-grading-section.ts';
 import { subtitlesSection } from './subtitles-section.ts';
+import { keyframeSelection, type KeyframeRef } from '../timeline/keyframe-track.ts';
+import type { BezierEditor } from './bezier-editor.ts';
+import { effectsStackSection } from './effects-stack-section.ts';
+import { keyframeCurveSection } from './keyframe-curve-section.ts';
+import { presetsSection } from './presets-section.ts';
+import { textAdvancedSection } from './text-advanced-section.ts';
+import type { PresetManager } from '../../presets/preset-manager.ts';
+import { getStudioServices } from '../studio-services.ts';
 
 /** What the inspector needs from its host. */
 export interface InspectorOptions {
@@ -42,6 +50,14 @@ export interface InspectorOptions {
   markers(): MarkerData[];
   /** Refreshes the inspector after a document change. */
   refresh(): void;
+  /** Fase 5: user/built-in presets (section hidden without it). */
+  presets?: PresetManager;
+  /** Fase 5: opens the font manager from the titling section. */
+  openFontManager?(): void;
+  /** Fase 5: live curve preview on the timeline while a Bézier handle drags. */
+  previewKeyframeCurve?(clipId: string, ref: KeyframeRef, curve: readonly number[] | null): void;
+  /** Fase 5: failure report (toast) for async preset work. */
+  onError?(error: unknown): void;
 }
 
 /** The clip property sheet. */
@@ -51,6 +67,11 @@ export class ClipInspector {
   private clipId = '';
   /** Fase 4: which effect groups the user left open (survives re-renders). */
   private readonly openGroups = new Map<string, boolean>();
+  /** Fase 5: effect rows whose parameters are expanded. */
+  private readonly openEffects = new Set<string>();
+  /** Fase 5: the live Bézier editor (disposed on every rebuild). */
+  private bezier: BezierEditor | null = null;
+  private readonly unsubscribeKeyframes: () => void;
 
   /**
    * @param options host wiring.
@@ -61,6 +82,17 @@ export class ClipInspector {
     this.element.className = 'inspector-section';
     this.element.setAttribute('role', 'group');
     this.element.setAttribute('aria-label', 'Inspector de clip');
+    // Fase 5: picking a ◆ in the timeline shows its curve here.
+    this.unsubscribeKeyframes = keyframeSelection.subscribe(() => {
+      if (!this.element.hidden && this.clipId) this.show(this.clipId);
+    });
+  }
+
+  /** Releases the keyframe subscription and the Bézier editor. */
+  dispose(): void {
+    this.unsubscribeKeyframes();
+    this.bezier?.dispose();
+    this.bezier = null;
   }
 
   /**
@@ -69,6 +101,8 @@ export class ClipInspector {
    */
   show(clipId: string): void {
     this.rememberOpenGroups();
+    this.bezier?.dispose();
+    this.bezier = null;
     this.clipId = clipId;
     const doc = this.options.getDocument();
     const clip = currentTimeline(doc).clips.find((candidate) => candidate.id === clipId);
@@ -144,9 +178,33 @@ export class ClipInspector {
   private buildMediaSections(clip: DocumentClip): void {
     const host = { getDocument: () => this.options.getDocument(), run: (op: EditOperation) => this.options.run(op) };
     const sections: (HTMLElement | null)[] = [];
+    // Fase 5: the selected keyframe's curve sits right after the ◆ list.
+    sections.push(
+      keyframeCurveSection(
+        {
+          run: host.run,
+          preview: (id, ref, curve) => {
+            if (this.options.previewKeyframeCurve) this.options.previewKeyframeCurve(id, ref, curve);
+            else getStudioServices()?.previewKeyframeCurve(id, ref, curve);
+          },
+        },
+        clip,
+        keyframeSelection.get(),
+        (editor) => {
+          this.bezier = editor;
+        },
+      ),
+    );
     if (clip.kind === 'video' || clip.kind === 'image') sections.push(chromaKeySection(host, clip), colorGradingSection(host, clip));
     if (clip.kind === 'video' || clip.kind === 'audio') sections.push(audioFxSection(host, clip));
     sections.push(subtitlesSection(host, clip));
+    // Fase 5: effect stacks, advanced titling and presets.
+    sections.push(effectsStackSection(host, clip, this.openEffects));
+    sections.push(textAdvancedSection({ ...host, openFontManager: () => this.openFontManager() }, clip));
+    const presets = this.options.presets ?? getStudioServices()?.presets ?? null;
+    if (presets) {
+      sections.push(presetsSection({ ...host, presets, onError: (error) => this.reportError(error) }, clip));
+    }
     for (const section of sections) {
       if (!section) continue;
       const key = [...section.classList].find((name) => name.startsWith('fx-') && name !== 'fx-group');
@@ -154,6 +212,20 @@ export class ClipInspector {
       if (open !== undefined && section instanceof HTMLDetailsElement) section.open = open;
       this.element.appendChild(section);
     }
+  }
+
+  /** Routes an async failure to the host (or the toast service / console). */
+  private reportError(error: unknown): void {
+    const studio = getStudioServices();
+    if (this.options.onError) this.options.onError(error);
+    else if (studio) studio.reportError('Presets', error);
+    else console.error(error);
+  }
+
+  /** Opens the font manager through the host or the installed services. */
+  private openFontManager(): void {
+    if (this.options.openFontManager) this.options.openFontManager();
+    else getStudioServices()?.openFontManager();
   }
 
   /** Records the open state of the effect groups before a rebuild. */

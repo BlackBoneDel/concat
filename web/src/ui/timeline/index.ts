@@ -38,3 +38,37 @@ export { ZoomControl, type ZoomControlOptions } from './zoom-control.ts';
 export { Minimap, type MinimapOptions } from './minimap.ts';
 export { Toolbar, type ToolbarActions } from './toolbar.ts';
 export { ContextMenu, type MenuItem } from './context-menu.ts';
+// Fase 5: keyframe lanes.
+export { expandButtonRect, FACE_PADDING } from './clip-renderer.ts';
+export {
+  KEYFRAME_LANE_HEIGHT,
+  LANE_PADDING,
+  NODE_RADIUS,
+  atToLaneX,
+  drawKeyframeNode,
+  hitKeyframe,
+  keyframeNodes,
+  laneYToPercent,
+  segmentAt,
+  valueToLaneY,
+  type KeyframeNode,
+  type LaneRect,
+} from './keyframe-node.ts';
+export {
+  KeyframeSelectionStore,
+  LANE_LABELS,
+  LANE_PROPERTIES,
+  defaultLaneProperty,
+  drawKeyframeLanes,
+  hitKeyframeLane,
+  keyframeSelection,
+  lanePropertiesFor,
+  laneRectFor,
+  nextLaneProperty,
+  sampleLaneCurve,
+  withPreview,
+  type KeyframeGesturePreview,
+  type KeyframeLaneState,
+  type KeyframeRef,
+  type LaneHit,
+} from './keyframe-track.ts';

@@ -11,7 +11,18 @@
 import type { DocumentClip, ProjectDocument } from '../../model/document.ts';
 import { currentTimeline, trackKindOf, type MarkerData } from '../../editor/operations.ts';
 import type { SelectionManager } from '../../editor/selection.ts';
-import { drawClips } from './clip-renderer.ts';
+import { drawClips, expandButtonRect, FACE_PADDING } from './clip-renderer.ts';
+import { KEYFRAME_LANE_HEIGHT } from './keyframe-node.ts';
+import {
+  defaultLaneProperty,
+  drawKeyframeLanes,
+  hitKeyframeLane,
+  keyframeSelection,
+  lanePropertiesFor,
+  type KeyframeGesturePreview,
+  type LaneHit,
+} from './keyframe-track.ts';
+import type { KeyProperty } from '../../model/wire.ts';
 import { drawMarkers, drawRuler, markerAtPosition, RULER_HEIGHT } from './ruler.ts';
 import { ThumbnailRenderer } from './thumbnail-renderer.ts';
 import { drawTransitions } from './transitions-renderer.ts';
@@ -86,6 +97,13 @@ export class TimelineView {
   private readonly waveform: WaveformRenderer;
   private readonly thumbnails: ThumbnailRenderer;
   private dragPreviewState: ClipDragPreview | null = null;
+  /** Fase 5: clips whose keyframe lane is open (⏷). */
+  private readonly expandedClips = new Set<string>();
+  /** Fase 5: the property each open lane shows. */
+  private readonly laneProperties = new Map<string, KeyProperty>();
+  /** Fase 5: ghost of a running keyframe gesture. */
+  private keyframePreviewState: KeyframeGesturePreview | null = null;
+  private readonly unsubscribeKeyframes: () => void;
 
   /**
    * @param options view wiring.
@@ -106,6 +124,7 @@ export class TimelineView {
     this.playheadEl.className = 'tl-playhead';
     this.playheadEl.setAttribute('aria-hidden', 'true');
     this.container.append(this.rulerCanvas, this.contentCanvas, this.playheadEl);
+    this.unsubscribeKeyframes = keyframeSelection.subscribe(() => this.requestRender());
     if (typeof ResizeObserver !== 'undefined') {
       this.resizeObserver = new ResizeObserver(() => this.relayout());
       this.resizeObserver.observe(this.container);
@@ -115,6 +134,7 @@ export class TimelineView {
   /** Detaches listeners and observers. */
   dispose(): void {
     this.disposed = true;
+    this.unsubscribeKeyframes();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.waveform.clear();
@@ -280,15 +300,26 @@ export class TimelineView {
     this.layouts = [];
     this.layoutById.clear();
     const doc = this.options.getDocument();
+    // Fase 5: forget lanes of clips that no longer exist.
+    const alive = new Set(timeline.clips.map((clip) => clip.id));
+    for (const id of [...this.expandedClips]) {
+      if (!alive.has(id)) {
+        this.expandedClips.delete(id);
+        this.laneProperties.delete(id);
+      }
+    }
+    const expandedTracks = new Set(timeline.clips.filter((clip) => this.expandedClips.has(clip.id)).map((clip) => clip.trackId));
     let y = 0;
     for (const track of timeline.tracks) {
       const collapsed = track.extra['collapsed'] === true;
-      const height = collapsed
+      const base = collapsed
         ? HEIGHT_COLLAPSED
         : trackKindOf(doc, track) === 'audio'
           ? HEIGHT_AUDIO
           : HEIGHT_VIDEO;
-      const layout: TrackLayout = { trackId: track.id, y, height, collapsed };
+      const lane = !collapsed && expandedTracks.has(track.id) ? KEYFRAME_LANE_HEIGHT : 0;
+      const height = base + lane;
+      const layout: TrackLayout = { trackId: track.id, y, height, collapsed, ...(lane > 0 ? { keyframeLane: lane } : {}) };
       this.layouts.push(layout);
       this.layoutById.set(track.id, layout);
       y += height;
@@ -349,6 +380,22 @@ export class TimelineView {
       waveform: this.waveform,
       thumbnails: this.thumbnails,
       preview: this.dragPreviewState,
+      expanded: this.expandedClips,
+    });
+    drawKeyframeLanes(contentCtx, {
+      clips: timeline.clips,
+      layouts: this.layouts,
+      viewport,
+      colors,
+      width,
+      height,
+      playheadX: this.playheadX(),
+      state: {
+        expanded: this.expandedClips,
+        property: (clip) => this.laneProperty(clip),
+        selected: keyframeSelection.get(),
+        preview: this.keyframePreviewState,
+      },
     });
     drawTransitions(contentCtx, {
       clips: timeline.clips,
@@ -402,6 +449,83 @@ export class TimelineView {
   /** The current drag preview, if any. */
   dragPreview(): ClipDragPreview | null {
     return this.dragPreviewState;
+  }
+
+  // -- Fase 5: keyframe lanes ------------------------------------------------
+
+  /** Whether a clip's keyframe lane is open. */
+  isExpanded(clipId: string): boolean {
+    return this.expandedClips.has(clipId);
+  }
+
+  /**
+   * Opens/closes a clip's keyframe lane (the "⏷" button).
+   * @param clipId the clip.
+   * @param open force a state (default: toggle).
+   */
+  toggleKeyframeLane(clipId: string, open = !this.expandedClips.has(clipId)): void {
+    if (open) this.expandedClips.add(clipId);
+    else this.expandedClips.delete(clipId);
+    this.relayout();
+  }
+
+  /**
+   * The property a clip's lane shows.
+   * @param clip the clip.
+   * @returns the property.
+   */
+  laneProperty(clip: DocumentClip): KeyProperty {
+    const chosen = this.laneProperties.get(clip.id);
+    return chosen && lanePropertiesFor(clip).includes(chosen) ? chosen : defaultLaneProperty(clip);
+  }
+
+  /**
+   * Switches the property a lane shows.
+   * @param clipId the clip.
+   * @param property the property.
+   */
+  setLaneProperty(clipId: string, property: KeyProperty): void {
+    this.laneProperties.set(clipId, property);
+    this.requestRender();
+  }
+
+  /**
+   * Sets the ghost of a keyframe gesture (null clears it).
+   * @param preview the ghost.
+   */
+  setKeyframePreview(preview: KeyframeGesturePreview | null): void {
+    this.keyframePreviewState = preview;
+    this.requestRender();
+  }
+
+  /**
+   * Hit-tests the open lanes.
+   * @param x content x.
+   * @param y content y.
+   * @returns the lane hit, or `null`.
+   */
+  keyframeLaneAt(x: number, y: number): LaneHit | null {
+    if (this.expandedClips.size === 0) return null;
+    const timeline = currentTimeline(this.options.getDocument());
+    return hitKeyframeLane(timeline.clips, this.layouts, this.viewportState, { expanded: this.expandedClips, property: (clip) => this.laneProperty(clip) }, x, y);
+  }
+
+  /**
+   * The clip whose "⏷" button is under a point.
+   * @param x content x.
+   * @param y content y.
+   * @returns the clip, or `null`.
+   */
+  expandButtonAt(x: number, y: number): DocumentClip | null {
+    const clip = this.clipAt(x, y);
+    if (!clip) return null;
+    const layout = this.layoutById.get(clip.trackId);
+    if (!layout || layout.collapsed) return null;
+    const cx = this.timeToX(clip.start);
+    const w = clip.duration * this.viewportState.pixelsPerSecond;
+    const button = expandButtonRect(cx, layout.y - this.viewportState.scrollTop + FACE_PADDING, w);
+    if (!button) return null;
+    return x >= button.x && x <= button.x + button.w && y >= button.y && y <= button.y + button.h ? clip : null;
   }
 
   /** The overlay layer (selection box, snap guides). */

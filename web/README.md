@@ -1,4 +1,4 @@
-# Concat Web — Fase 4: pipeline de medios avanzado
+# Concat Web — Fase 5: keyframes visuales, efectos, titulación y presets
 
 Port of [`jub0t/Concat`](https://github.com/jub0t/Concat) (the open-source,
 cross-platform video editor) to a **100% local web application**. No servers,
@@ -56,6 +56,73 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 9. **Rhythm** — autosave every 30s + restore on reopen, undo per gesture,
    real-time canvas preview, all colors from theme variables, full keyboard
    shortcuts that never fire while typing.
+
+## Fase 5 — keyframes visuales, stack de efectos, titulación avanzada y presets
+
+Todo sigue siendo local: las fuentes viven en OPFS (`/fonts/<uuid>.<ext>`),
+el impulso de la reverb se sintetiza en RAM dentro de un Web Worker y los
+presets se guardan en `ConcatProjectDB.user_presets`. Ningún módulo F1–F4 cambió
+de arquitectura: todo entra como `EditOperation` nuevas y en `extra`
+(`clip.extra.effects.stack/audioStack`, `clip.extra.advanced_text`,
+`doc.extra.fonts`) con lectores estrictos que toleran claves desconocidas.
+
+| Área | Módulos | Notas |
+|---|---|---|
+| Operaciones | `editor/effects-operations.ts`, `editor/keyframe-operations.ts`, `editor/text-operations.ts` | `AddVideoEffect`, `RemoveVideoEffect`, `ReorderVideoEffects`, `UpdateEffectParam` (fusión 600 ms), `ToggleEffect`; `UpdateKeyframeCurve` (cubic-bezier con x∈[0,1], y libre ±3), `MoveKeyframeValue`; `UpdateTextStyles`, `AddCustomFont`/`RemoveCustomFont`. Todas reversibles y validadas (`EditError` → toast). |
+| Keyframes en el timeline | `ui/timeline/keyframe-track.ts`, `keyframe-node.ts`, `ui/interactions/keyframe-drag.ts`, `curve-drag.ts` | Botón **⏷** en la cara del clip abre una sub-pista de 64 px: línea central, curva interpolada con `core/animate.ts` (`KeyTrack`/`bezierYAtX`) y rombos ◆. Arrastre horizontal = tiempo `Rational` con imán al playhead (8 px, `Alt` lo desactiva), vertical = valor 0–100 % del rango de la propiedad, `Shift` bloquea el eje. Arrastrar un tramo lo curva (ease-in/out). Doble clic añade un ◆; clic en la etiqueta cambia de propiedad. Un gesto = un paso de historial. |
+| Editor Bézier | `ui/inspector/bezier-editor.ts`, `keyframe-curve-section.ts` | Canvas 150×150, P0(0,0)–P3(1,1), x1/x2 limitados a [0,1], y libre (ventana −0,5…1,5); presets Linear / Ease-In / Ease-Out / Ease-In-Out / Hold; teclado (1/2 elige asa, flechas, `Shift` ×10, Enter); vista previa en vivo sobre la sub-pista. |
+| Stack de efectos | `media/effects/*`, `render/video-effects-engine.ts`, `ui/inspector/effects-stack-section.ts` | Vídeo: desenfoque gaussiano de 2 pasadas, viñeta (radio/suavidad), pixelado `floor(uv·bloques)/bloques`, ruido animado por tiempo, glitch (desplazamiento RGB + bandas). WebGL2 con ping-pong de FBO; fallback Canvas 2D (`ctx.filter` o CPU). Orden en el compositor: Source → Crop → Chroma (F4) → **Stack (F5)** → Color (F4) → Transform → Blend/Opacidad. Audio: delay (10–2000 ms, feedback ≤0,95, mix), reverb (Convolver + IR sintético), chorus; en serie tras la cadena F4 del `AudioMixer`. Filas reordenables con arrastrar y soltar o `Alt+↑/↓`, bypass y ×. |
+| Reverb IR | `media/effects/reverb-ir-generator.ts`, `workers/reverb-worker.ts` | Ruido blanco × e^(−t/τ) con low-pass de un polo (damping) por canal; `roomSize` fija el RT60 (0,3–5 s, τ = RT60 / ln 1000). Worker con transferencia de buffers y fallback asíncrono troceado; caché LRU de 8 colas. |
+| Titulación | `render/text-engine.ts`, `render/advanced-text.ts`, `render/font-loader.ts`, `storage/font-store.ts`, `ui/inspector/text-advanced-section.ts`, `ui/components/font-manager-modal.ts` | Caja de fondo (`measureText` + padding + `roundRect`), borde, sombra, brillo, relleno sólido o degradado (si `fill` es un array), máquina de escribir `progress = (t − inicio)/duración` sobre los code points con cursor opcional. Fuentes `.ttf/.otf/.woff/.woff2` validadas por magic bytes, guardadas en OPFS y registradas con `FontFace` + `document.fonts.add`. |
+| Presets | `presets/*`, `ui/inspector/presets-section.ts` | Integrados: Fade In, Zoom In, Zoom In + Desenfoque, Slide Left/Right, Bounce, Typewriter, Cinematic Title, Neon Glow. Propios (`UserPreset{id,name,type,data}`) capturados del clip. Aplicar es una sola `ApplyPresetOperation` (deshacible). |
+| VU estéreo | `ui/components/vu-meter-stereo.ts`, hook `addMasterTap` en `player/audio-mixer.ts` | Máster → `ChannelSplitter` → 2 `AnalyserNode`; pico en dBFS (−60…0), peak-hold 1,5 s, LED de clip 2 s (clic para reiniciar), bucle `requestAnimationFrame`, colores de las variables del tema. |
+
+### Compatibilidad (Fase 5)
+
+| Capacidad | Chrome/Edge 113+ | Firefox 120+ | Safari 17+ |
+|---|---|---|---|
+| Stack de vídeo (WebGL2) | ✅ | ✅ | ✅ (Canvas 2D si no hay contexto) |
+| Desenfoque Canvas 2D | `ctx.filter` | `ctx.filter` | CPU (sin `ctx.filter`) |
+| `FontFace` / `document.fonts` | ✅ | ✅ | ✅ |
+| `ConvolverNode` / `ChannelSplitter` | ✅ | ✅ | ✅ |
+| `roundRect` (caja de texto) | ✅ | ✅ (112+) | ✅ (16+); trazado manual si falta |
+| Fuentes en OPFS | ✅ | ✅ | ✅ (memoria de sesión si OPFS falla) |
+
+### Notas de diseño
+
+- **Una sola conexión IndexedDB v3** (`projects` + `user_presets`) compartida
+  por `ProjectStore` y `PresetManager`: abrir otra conexión a otra versión
+  quedaría bloqueada.
+- **Keys absolutos**: `key.ease` es la curva con la que se *llega* a ese key
+  desde el anterior; por eso el primer ◆ avisa de que su curva no tiene efecto.
+- **Bundle**: el motor de efectos de vídeo (shaders + kernels de CPU), el
+  gestor de fuentes y los diálogos de la Fase 4 se cargan bajo demanda
+  (`import()`), lo que mantiene el chunk principal por debajo de 150 KB gzip.
+  Hasta que llega el motor, los frames se pintan sin stack, igual que en la Fase 4.
+- **Deshacer**: `Ctrl+Z` y el botón ↶ de la cabecera recorren la historia de
+  la sesión de edición, que incluye inspector, timeline, presets y fuentes.
+
+### Tests (Fase 5)
+
+**696 tests en 77 suites, 0 fallos** (los 550 de F1–F4 intactos + 146 nuevos):
+operaciones de efectos, matemática Bézier y clamp, motor de texto (caja de
+fondo, typewriter, degradado, sombra), efectos de vídeo (CPU/Canvas 2D),
+efectos de audio y cadena en serie, IR de reverb (decay, damping,
+determinismo, worker), presets (IDB, aplicar + deshacer), sub-pista de
+keyframes, arrastre con imán, curvas, editor Bézier (puntero y teclado),
+secciones del inspector, gestor de fuentes y VU meter.
+`npm run typecheck` sin errores; `npm run build` → chunk principal 148 KB gzip.
+
+### Checklist demo de la Fase 5
+
+1. Clip de vídeo → **⏷** en su esquina: se abre la sub-pista. Doble clic añade ◆; arrástralos (imán al playhead, `Alt` sin imán, `Shift` bloquea eje).
+2. Selecciona un ◆ → inspector **Curva del keyframe**: arrastra las asas (x no sale de [0,1], y sí) o usa los presets.
+3. Clip de texto → **Titulación avanzada**: borde, sombra, caja de fondo; **Máquina de escribir** con duración 2 s.
+4. **Gestionar fuentes…** → añade un `.ttf` → elígelo en *Fuente*.
+5. Clip de vídeo → **Stack de efectos**: añade Desenfoque y Viñeta, reordénalos arrastrando (o `Alt+↑/↓`).
+6. Reproduce: el **VU** estéreo de la cabecera marca L/R, mantiene el pico 1,5 s y enciende el LED si llega a 0 dBFS.
+7. Clip de audio → Stack → **Reverb** (tamaño de sala, damping, mezcla).
+8. **Presets** → «Zoom In + Desenfoque» y después `Ctrl+Z`: el clip vuelve a su estado anterior en un solo paso.
 
 ## Fase 4 — pipeline de medios avanzado
 
@@ -317,8 +384,8 @@ Faithfulness details worth knowing:
 | 1 | Core model & project schema | done (`web/tests`, `web/README` history) |
 | 2 | Compositor, playback, editor shell, local storage | done (`web/tests`, history below) |
 | 3 | Interactive multitrack timeline with professional editing | done |
-| 4 | Advanced media pipeline: proxies, FFmpeg fallback, audio/vision, subtitles, relinking | **this document** |
-| 5 | Effects & keyframes in the UI | |
+| 4 | Advanced media pipeline: proxies, FFmpeg fallback, audio/vision, subtitles, relinking | done |
+| 5 | Visual keyframes, video/audio effect stacks, advanced titling, presets | **this document** |
 | 6 | Export pipeline (MP4/WebM, local) | |
 
 ## License

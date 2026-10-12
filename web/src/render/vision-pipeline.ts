@@ -21,6 +21,25 @@ import { type ClipEffects, hasVisualEffects } from '../media/clip-effects.ts';
 import { VisionProcessor, type VisionProcessorOptions } from '../media/vision/vision-processor.ts';
 import type { RenderImage } from './types.ts';
 
+/**
+ * Fase 5: which part of the vision effects to run. The compositor splits the
+ * F4 pass around the effect stack — `key` (chroma/luma/spill/feather) before
+ * it, `grade` (colour grading + LUT) after it; `all` is the Fase 4 pass.
+ */
+export type VisionStage = 'all' | 'key' | 'grade';
+
+/**
+ * Restricts effects to one stage.
+ * @param effects the clip's effects.
+ * @param stage the stage to keep.
+ * @returns a copy with the other stage's sections cleared.
+ */
+export function effectsForStage(effects: ClipEffects, stage: VisionStage): ClipEffects {
+  if (stage === 'key') return { ...effects, colorGrading: null, lut: null, splitView: false };
+  if (stage === 'grade') return { ...effects, chromaKey: null, lumaKey: null, spill: null, feather: null };
+  return effects;
+}
+
 /** What the compositor calls. */
 export interface VisionHook {
   /**
@@ -28,9 +47,10 @@ export interface VisionHook {
    * @param source its decoded frame.
    * @param width the source's pixel width (as the compositor crops it).
    * @param height the source's pixel height.
+   * @param stage Fase 5: run only the key or the grade part (default: all).
    * @returns a processed picture of the same size, or `null` for the source as-is.
    */
-  process(clip: Clip, source: RenderImage, width: number, height: number): RenderImage | null;
+  process(clip: Clip, source: RenderImage, width: number, height: number, stage?: VisionStage): RenderImage | null;
 }
 
 let installed: VisionHook | null = null;
@@ -81,7 +101,7 @@ export class VisionPipeline implements VisionHook {
   }
 
   /** {@inheritDoc VisionHook.process} */
-  process(clip: Clip, source: RenderImage, width: number, height: number): RenderImage | null {
+  process(clip: Clip, source: RenderImage, width: number, height: number, stage: VisionStage = 'all'): RenderImage | null {
     if (!this.enabled) return null;
     let effects: ClipEffects | null;
     try {
@@ -90,7 +110,7 @@ export class VisionPipeline implements VisionHook {
       this.report(error);
       return null;
     }
-    return effects ? this.applyEffects(source, effects, width, height) : null;
+    return effects ? this.applyEffects(source, effectsForStage(effects, stage), width, height) : null;
   }
 
   /**

@@ -33,6 +33,12 @@ import { ClipDrag, type ClipDragOptions } from './clip-drag.ts';
 import { SplitTool } from './split-tool.ts';
 import { SelectionDrag } from './selection-drag.ts';
 import { TrimDrag, type TrimMode } from './trim-drag.ts';
+import { KeyframeDrag } from './keyframe-drag.ts';
+import { CurveDrag } from './curve-drag.ts';
+import { keyframeSelection, nextLaneProperty } from '../timeline/keyframe-track.ts';
+import { percentToValue } from '../../editor/keyframe-operations.ts';
+import { AddKeyframeOperation, keyframeId } from '../../editor/operations.ts';
+import { KeyEase } from '../../model/wire.ts';
 
 /** What the drag manager needs from its host (the timeline panel). */
 export interface DragManagerOptions {
@@ -54,7 +60,7 @@ export interface DragManagerOptions {
 }
 
 /** Who owns the current pointer gesture. */
-type DragKind = 'none' | 'clip' | 'trim-in' | 'trim-out' | 'marquee' | 'marker' | 'playhead';
+type DragKind = 'none' | 'clip' | 'trim-in' | 'trim-out' | 'marquee' | 'marker' | 'playhead' | 'keyframe' | 'curve';
 
 /** The timeline's pointer controller. */
 export class DragManager {
@@ -63,6 +69,9 @@ export class DragManager {
   private readonly trimDrag: TrimDrag;
   private readonly selectionDrag: SelectionDrag;
   private readonly splitTool: SplitTool;
+  /** Fase 5: ◆ drags and curve bends in the keyframe lanes. */
+  private readonly keyframeDrag = new KeyframeDrag();
+  private readonly curveDrag = new CurveDrag();
   private dragKind: DragKind = 'none';
   private pointerDown = false;
   private startedOnClip = '';
@@ -109,6 +118,8 @@ export class DragManager {
   /** Removes every listener. */
   dispose(): void {
     this.abort.abort();
+    this.keyframeDrag.cancel();
+    this.curveDrag.cancel();
     this.clipDrag.cancel();
     this.trimDrag.cancel();
     this.selectionDrag.cancel();
@@ -116,6 +127,9 @@ export class DragManager {
 
   /** Cancels the running gesture (Escape). */
   cancelGesture(): void {
+    this.keyframeDrag.cancel();
+    this.curveDrag.cancel();
+    this.options.view.setKeyframePreview(null);
     this.clipDrag.cancel();
     this.trimDrag.cancel();
     this.selectionDrag.cancel();
@@ -169,6 +183,16 @@ export class DragManager {
       }
       return;
     }
+    // Fase 5: the "⏷" button and the keyframe lanes come before clip hits.
+    const toggled = this.options.view.expandButtonAt(x, y);
+    if (toggled) {
+      this.options.view.toggleKeyframeLane(toggled.id);
+      // Track heights changed: headers and scroll size must follow.
+      this.options.onChange();
+      this.pointerDown = false;
+      return;
+    }
+    if (this.beginLaneGesture(x, y)) return;
     if (tool === 'blade') {
       const ops = this.splitTool.splitAtPoint(x, y);
       if (ops.length > 0) this.runOps(ops);
@@ -220,6 +244,19 @@ export class DragManager {
     const { x, y } = this.contentPoint(event);
     if (!this.pointerDown) return;
     switch (this.dragKind) {
+      case 'keyframe':
+        this.keyframeDrag.update(x, y, {
+          playheadSeconds: this.options.playheadSeconds(),
+          pixelsPerSecond: this.options.view.zoom(),
+          snap: this.options.isSnappingEnabled() && !event.altKey,
+          lockAxis: event.shiftKey,
+        });
+        this.options.view.setKeyframePreview(this.keyframeDrag.preview());
+        break;
+      case 'curve':
+        this.curveDrag.update(y);
+        this.options.view.setKeyframePreview(this.curveDrag.preview());
+        break;
       case 'clip':
         this.clipDrag.update(
           this.options.view.xToTime(x),
@@ -258,6 +295,20 @@ export class DragManager {
     this.pointerDown = false;
     const shift = event.shiftKey;
     switch (this.dragKind) {
+      case 'keyframe': {
+        const selected = keyframeSelection.get();
+        const result = this.keyframeDrag.commit();
+        this.options.view.setKeyframePreview(null);
+        if (result?.op) this.runOps([result.op]);
+        if (result && selected) keyframeSelection.set({ ...selected, keyframeId: result.keyframeId });
+        break;
+      }
+      case 'curve': {
+        const op = this.curveDrag.commit();
+        this.options.view.setKeyframePreview(null);
+        if (op) this.runOps([op]);
+        break;
+      }
       case 'clip': {
         const ops = this.clipDrag.commit();
         this.runOps(ops);
@@ -313,6 +364,15 @@ export class DragManager {
     const rect = this.options.view.contentRect();
     const x = event.clientX - rect.left;
     const y = event.clientY - rect.top;
+    // Fase 5: double-click on an empty spot of a lane adds a key there.
+    const lane = y > this.options.view.rulerHeight ? this.options.view.keyframeLaneAt(x, y) : null;
+    if (lane && !lane.node && !lane.onLabel) {
+      const time = lane.clip.start + lane.at * lane.clip.duration;
+      const value = percentToValue(lane.property, lane.percent);
+      this.runOps([new AddKeyframeOperation(lane.clip.id, lane.property, Rational.approximate(time) ?? Rational.ZERO, value, KeyEase.LINEAR)]);
+      keyframeSelection.set({ clipId: lane.clip.id, property: lane.property, keyframeId: keyframeId(lane.property, lane.at) });
+      return;
+    }
     if (y <= this.options.view.rulerHeight) {
       // Add a marker where the user double-clicked.
       this.runOps([
@@ -332,6 +392,43 @@ export class DragManager {
     const clip = this.options.view.clipAt(x, y);
     this.options.onContextMenu(event.clientX, event.clientY, clip?.id ?? null);
   };
+
+  /**
+   * Fase 5: starts a ◆ drag, a curve bend or a property switch when the
+   * pointer is inside an open keyframe lane.
+   * @param x content x.
+   * @param y content y.
+   * @returns whether the lane took the gesture.
+   */
+  private beginLaneGesture(x: number, y: number): boolean {
+    const view = this.options.view;
+    const hit = view.keyframeLaneAt(x, y);
+    if (!hit) return false;
+    this.startedOnClip = hit.clip.id;
+    if (hit.onLabel) {
+      view.setLaneProperty(hit.clip.id, nextLaneProperty(hit.clip, hit.property));
+      this.pointerDown = false;
+      return true;
+    }
+    if (hit.node) {
+      keyframeSelection.set({ clipId: hit.clip.id, property: hit.property, keyframeId: hit.node.id });
+      // The inspector follows the clip whose key is being edited.
+      if (!this.options.selection.isSelected(hit.clip.id)) this.selectionDrag.clickClip(hit.clip.id, { ctrl: false, shift: false });
+      this.keyframeDrag.begin({ clip: hit.clip, property: hit.property, keyframeId: hit.node.id, lane: hit.lane, pointerX: x, pointerY: y });
+      this.dragKind = 'keyframe';
+      return true;
+    }
+    if (hit.segment) {
+      keyframeSelection.set({ clipId: hit.clip.id, property: hit.property, keyframeId: hit.segment.to.id });
+      this.curveDrag.begin(hit.clip.id, hit.property, hit.segment.from, hit.segment.to, hit.lane, y);
+      this.dragKind = 'curve';
+      return true;
+    }
+    // Empty lane area: swallow the press (double-click adds a key).
+    keyframeSelection.set(null);
+    this.pointerDown = false;
+    return true;
+  }
 
   /** Runs operations through history and notifies the host. */
   private runOps(ops: EditOperation[]): void {

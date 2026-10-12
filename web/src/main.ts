@@ -37,6 +37,21 @@ import { MediaToolkit } from './app/media-toolkit.ts';
 import { EffectsCache, createAudioFxResolver, createVisionResolver } from './app/effect-resolvers.ts';
 import { setMediaTools } from './ui/media-tools.ts';
 import { PROXY_TOGGLE_SHORTCUT } from './ui/header-bar.ts';
+// Fase 5: effect stacks, advanced titling, custom fonts, presets, VU meter.
+import { createTextEngineHook, createVideoEffectsHook, withAudioStack } from './app/effect-resolvers.ts';
+import { projectFonts } from './editor/text-operations.ts';
+import type { EditOperation } from './editor/operations.ts';
+import { ReverbIrProvider } from './media/effects/reverb-ir-generator.ts';
+import { addMasterTap } from './player/audio-mixer.ts';
+import { PresetManager, PRESETS_DB_NAME, PRESETS_DB_VERSION, USER_PRESETS_STORE } from './presets/preset-manager.ts';
+import { FontLoader } from './render/font-loader.ts';
+import { setTextEngineHook } from './render/text-engine.ts';
+import type { VideoEffectsEngine } from './render/video-effects-engine.ts';
+import { setVideoEffectsHook } from './render/video-effects-hook.ts';
+import { FontStore } from './storage/font-store.ts';
+import { IndexedDbKeyValue } from './storage/idb.ts';
+import { VuMeterStereo } from './ui/components/vu-meter-stereo.ts';
+import { setStudioServices } from './ui/studio-services.ts';
 import {
   HeaderBar,
   InspectorPanel,
@@ -92,6 +107,15 @@ class EditorApp implements AppContext {
   readonly media: MediaToolkit;
   private readonly effectsCache = new EffectsCache();
   private audioProcessor: AudioProcessor | null = null;
+  /** Fase 5: project fonts (OPFS `/fonts/`) and their FontFace registration. */
+  private readonly fontStore = new FontStore();
+  private readonly fontLoader = new FontLoader(this.fontStore);
+  /** Fase 5: reverb tails, synthesised in a worker and cached. */
+  private readonly reverbIrs = new ReverbIrProvider();
+  private videoEffects: VideoEffectsEngine | null = null;
+  private vuMeter: VuMeterStereo | null = null;
+  /** Fase 5: presets in `ConcatProjectDB.user_presets`. */
+  presets = new PresetManager(new MemoryKeyValue());
   mediaStore: MediaStore;
   projectStore: ProjectStore;
   history = new History();
@@ -141,8 +165,12 @@ class EditorApp implements AppContext {
     // Storage backends (real IndexedDB + OPFS when available).
     const mediaBackend = await openKeyValue('ConcatMediaDB', ['files']);
     this.mediaStore = new MediaStore(mediaBackend);
-    const projectBackend = await openKeyValue('ConcatProjectDB', ['projects']);
+    // Fase 5: one v3 connection (projects + user_presets) shared by both
+    // stores — a second connection at another version would block.
+    const projectBackend =
+      (await IndexedDbKeyValue.open(PRESETS_DB_NAME, PRESETS_DB_VERSION, ['projects', USER_PRESETS_STORE])) ?? new MemoryKeyValue();
     this.projectStore = new ProjectStore(projectBackend);
+    this.presets = new PresetManager(projectBackend);
 
     // Audio: a live context (starts suspended until the first play).
     let audioContext: AudioContext | null = null;
@@ -173,6 +201,7 @@ class EditorApp implements AppContext {
     setMediaTools(this.media);
     this.header.syncProxyToggle();
     this.installEffectHooks(audioContext);
+    this.installStudio(layout.header);
 
     // Shortcuts.
     this.wireShortcuts();
@@ -374,12 +403,19 @@ class EditorApp implements AppContext {
     const processor = new AudioProcessor();
     processor.onVariantReady = reschedule;
     this.audioProcessor = processor;
-    setDefaultAudioFxResolver(createAudioFxResolver({
+    const fx = createAudioFxResolver({
       processor,
       getDocument: () => this.session.document,
       cache: this.effectsCache,
       onMeasured: reschedule,
       onError: (error) => console.warn('Medición de sonoridad fallida', error),
+    });
+    // Fase 5: the clip's audio stack (delay/reverb/chorus) in series after F4.
+    setDefaultAudioFxResolver(withAudioStack(fx, {
+      getDocument: () => this.session.document,
+      cache: this.effectsCache,
+      irs: this.reverbIrs,
+      onError: (error) => this.reportError('Efecto de audio', error),
     }));
     if (audioContext) {
       void ensureGateWorklet(audioContext).catch((error: unknown) => console.warn('Puerta de ruido sin AudioWorklet', error));
@@ -389,6 +425,78 @@ class EditorApp implements AppContext {
       onError: (error) => this.media.notify('error', 'Efecto de vídeo', error.message),
     }));
     this.media.luts.onChange(() => this.requestRender());
+  }
+
+  /**
+   * Fase 5: video effect stack + titling hooks, custom fonts, the master VU
+   * meter and the UI services (presets, font manager, curve preview).
+   * @param header the header bar root (hosts the VU meter).
+   */
+  private installStudio(header: HTMLElement): void {
+    // The engine (shaders + CPU kernels) loads in its own chunk; until it
+    // arrives frames render without the stack, exactly as in Fase 4.
+    void import('./render/video-effects-engine.ts')
+      .then(({ VideoEffectsEngine: Engine }) => {
+        this.videoEffects = new Engine();
+        setVideoEffectsHook(createVideoEffectsHook(() => this.session.document, this.videoEffects, this.effectsCache));
+        this.requestRender();
+      })
+      .catch((error: unknown) => this.reportError('Efectos de vídeo', error));
+    setTextEngineHook(createTextEngineHook(() => this.session.document, this.fontLoader));
+    this.fontLoader.onLoad(() => this.requestRender());
+    this.presets.onChange(() => this.inspectorPanel?.refresh());
+
+    this.vuMeter = new VuMeterStereo({ addMasterTap: (tap) => addMasterTap(tap) });
+    const actions = header.querySelector('.header-actions');
+    (actions ?? header).appendChild(this.vuMeter.element);
+
+    setStudioServices({
+      presets: this.presets,
+      openFontManager: () => {
+        void import('./ui/components/font-manager-modal.ts')
+          .then(({ openFontManager }) =>
+            openFontManager({
+              getDocument: () => this.session.document,
+              run: (op) => this.runStudioOp(op),
+              store: this.fontStore,
+              loader: this.fontLoader,
+              onError: (error) => this.reportError('Fuentes', error),
+            }),
+          )
+          .catch((error: unknown) => this.reportError('Fuentes', error));
+      },
+      previewKeyframeCurve: (clipId, ref, curve) => this.timelinePanel?.previewKeyframeCurve(clipId, ref, curve),
+      reportError: (title, error) => this.reportError(title, error),
+    });
+
+    window.addEventListener('pagehide', () => {
+      this.vuMeter?.dispose();
+      this.videoEffects?.dispose();
+      this.reverbIrs.dispose();
+    }, { once: true });
+  }
+
+  /** Fase 5: an edit from a dialog (history + refresh + autosave). */
+  private runStudioOp(op: EditOperation): boolean {
+    const ok = this.session.run(op);
+    if (ok) {
+      this.inspectorPanel?.refresh();
+      this.requestRender();
+      this.requestAutosave();
+    }
+    return ok;
+  }
+
+  /** Fase 5: toast + console, never a crash. */
+  private reportError(title: string, error: unknown): void {
+    console.error(title, error);
+    this.notifications.error(title, error instanceof Error ? error.message : String(error));
+  }
+
+  /** Fase 5: registers the open project's fonts with `document.fonts`. */
+  private syncFonts(): void {
+    const fonts = projectFonts(this.session.document);
+    if (fonts.length > 0) void this.fontLoader.loadAll(fonts);
   }
 
   private wireShortcuts(): void {
@@ -502,6 +610,7 @@ class EditorApp implements AppContext {
 
   /** Rebuilds every panel from the session. */
   private refreshAll(): void {
+    this.syncFonts();
     this.mediaPanel?.refresh();
     this.timelinePanel?.refresh();
     this.inspectorPanel?.refresh();

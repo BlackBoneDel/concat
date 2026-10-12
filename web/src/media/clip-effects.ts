@@ -20,6 +20,15 @@ import { sanitizeGrading, isNeutralGrading, type ColorGradingParams } from './vi
 import { validateFeather, type FeatherParams } from './vision/edge-feather.ts';
 import { validateLumaKey, type LumaKeyParams } from './vision/luminance-key.ts';
 import type { SpillParams } from './vision/spill-suppression.ts';
+import {
+  AUDIO_STACK_KEY,
+  VIDEO_STACK_KEY,
+  parseAudioStack,
+  parseVideoStack,
+  serializeStack,
+  type AudioEffectInstance,
+  type VideoEffectInstance,
+} from './effects/effects-stack.ts';
 
 /** The `extra` key effects live under. */
 export const EFFECTS_KEY = 'effects';
@@ -44,6 +53,10 @@ export interface ClipEffects {
   /** Before/after split view of the grade (preview only). */
   splitView: boolean;
   audio: AudioEffects | null;
+  /** Fase 5: the ordered video effect stack (absent = none). */
+  stack?: VideoEffectInstance[];
+  /** Fase 5: the ordered audio effect stack (absent = none). */
+  audioStack?: AudioEffectInstance[];
 }
 
 /** No effects. */
@@ -101,6 +114,11 @@ export function parseClipEffects(value: unknown): ClipEffects {
   }
   out.splitView = record['splitView'] === true;
   if (record['audio'] !== undefined && record['audio'] !== null) out.audio = parseAudioEffects(record['audio']);
+  // Fase 5: the stacks ride along so Fase 4 edits never drop them.
+  const stack = parseVideoStack(record[VIDEO_STACK_KEY]);
+  if (stack.length > 0) out.stack = stack;
+  const audioStack = parseAudioStack(record[AUDIO_STACK_KEY]);
+  if (audioStack.length > 0) out.audioStack = audioStack;
   return out;
 }
 
@@ -134,6 +152,14 @@ export function serializeClipEffects(effects: ClipEffects): JsonObject | null {
   }
   if (effects.splitView) {
     out['splitView'] = true;
+    any = true;
+  }
+  if (effects.stack && effects.stack.length > 0) {
+    out[VIDEO_STACK_KEY] = serializeStack(effects.stack);
+    any = true;
+  }
+  if (effects.audioStack && effects.audioStack.length > 0) {
+    out[AUDIO_STACK_KEY] = serializeStack(effects.audioStack);
     any = true;
   }
   return any ? out : null;

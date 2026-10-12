@@ -45,6 +45,8 @@ import {
   type ShortcutActions,
 } from './interactions/keyboard-shortcuts.ts';
 import type { AppContext } from './app-context.ts';
+import { clampBezier } from '../editor/keyframe-operations.ts';
+import type { KeyframeRef } from './timeline/keyframe-track.ts';
 
 /** The Fase-3 timeline panel. */
 export class TimelinePanel {
@@ -265,6 +267,23 @@ export class TimelinePanel {
   }
 
   /** Zooms in (menu/shortcut). */
+  /**
+   * Fase 5: ghost curve of a keyframe segment while the inspector's Bézier
+   * handle drags (visual only; the edit commits on release).
+   * @param clipId the clip.
+   * @param ref the keyframe whose approach curve is previewed.
+   * @param curve the curve, or `null` to clear the ghost.
+   */
+  previewKeyframeCurve(clipId: string, ref: KeyframeRef, curve: readonly number[] | null): void {
+    if (!this.view) return;
+    if (!curve) {
+      this.view.setKeyframePreview(null);
+      return;
+    }
+    if (!this.view.isExpanded(clipId)) this.view.toggleKeyframeLane(clipId, true);
+    this.view.setKeyframePreview({ clipId, property: ref.property, keyframeId: ref.keyframeId, curve: clampBezier(curve) });
+  }
+
   zoomIn(): void {
     this.view?.setZoom((this.view?.zoom() ?? 80) * 1.25);
     this.zoomControl?.refresh();
@@ -358,6 +377,9 @@ export class TimelinePanel {
         this.trackHeadersEl.appendChild(header.element);
       }
       header.refresh();
+      // Fase 5: open keyframe lanes make a track taller; headers follow.
+      const layout = this.view.trackLayout(track.id);
+      if (layout) header.element.style.height = `${layout.height}px`;
     }
     for (const [id, header] of this.headers) {
       if (!seen.has(id)) {

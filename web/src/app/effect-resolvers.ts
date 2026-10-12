@@ -21,6 +21,13 @@ import { curveTable } from '../media/audio/fader-curves.ts';
 import { normalizationGain, type LoudnessResult } from '../media/audio/normalizer.ts';
 import type { DocumentClip, ProjectDocument } from '../model/document.ts';
 import type { AudioFxResolution, AudioFxResolver } from '../player/audio-mixer.ts';
+import { buildAudioStackChain, chainInSeries, isFxAudioContext, type IrSource } from '../media/effects/audio-effects.ts';
+import { stackIsActive } from '../media/effects/effects-stack.ts';
+import { projectFonts } from '../editor/text-operations.ts';
+import { ADVANCED_TEXT_KEY, parseAdvancedText, type AdvancedTextStyle } from '../render/advanced-text.ts';
+import type { FontLoader } from '../render/font-loader.ts';
+import type { TextEngineHook } from '../render/text-engine.ts';
+import type { VideoEffectsEngine, VideoEffectsHook } from '../render/video-effects-engine.ts';
 
 /** Finds a document clip by id across timelines. */
 export function findDocClip(doc: ProjectDocument, clipId: string): DocumentClip | null {
@@ -140,5 +147,93 @@ export function createAudioFxResolver(options: AudioFxResolverOptions): AudioFxR
     if (spec.fadeIn > 0 && audio.fadeInCurve !== 'linear') out.fadeInCurve = curveTable(audio.fadeInCurve, spec.volume, 'in');
     if (spec.fadeOut > 0 && audio.fadeOutCurve !== 'linear') out.fadeOutCurve = curveTable(audio.fadeOutCurve, spec.volume, 'out');
     return out;
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Fase 5: effect stacks (video + audio) and advanced titling.
+// ---------------------------------------------------------------------------
+
+/** Options of {@link withAudioStack}. */
+export interface AudioStackResolverOptions {
+  getDocument: () => ProjectDocument;
+  cache?: EffectsCache;
+  /** Reverb tail provider (worker-backed in the app). */
+  irs: IrSource;
+  onError?: (error: unknown) => void;
+}
+
+/**
+ * Wraps the Fase 4 resolver so each clip's audio stack (delay, reverb,
+ * chorus) runs in series after the Fase 4 chain, before the track fader.
+ * @param base the Fase 4 resolver (or null).
+ * @param options document, cache and IR provider.
+ * @returns the combined resolver.
+ */
+export function withAudioStack(base: AudioFxResolver | null, options: AudioStackResolverOptions): AudioFxResolver {
+  const cache = options.cache ?? new EffectsCache();
+  return (key, spec, context): AudioFxResolution | null => {
+    const resolved = base?.(key, spec, context) ?? null;
+    const clip = findDocClip(options.getDocument(), key);
+    const stack = clip ? cache.of(clip)?.audioStack ?? [] : [];
+    if (stack.length === 0 || !isFxAudioContext(context)) return resolved;
+    const chain = buildAudioStackChain(context, stack, options.irs, options.onError);
+    if (!chain) return resolved;
+    return { ...(resolved ?? {}), chain: chainInSeries(resolved?.chain ?? null, chain) };
+  };
+}
+
+/**
+ * The compositor's effect-stack hook.
+ * @param getDocument current document.
+ * @param engine the renderer (WebGL2 → Canvas 2D).
+ * @param cache shared parse cache.
+ * @returns the hook to install with `setVideoEffectsHook`.
+ */
+export function createVideoEffectsHook(getDocument: () => ProjectDocument, engine: VideoEffectsEngine, cache = new EffectsCache()): VideoEffectsHook {
+  return {
+    resolve: (clip) => {
+      const docId: unknown = 'docId' in clip ? clip.docId : undefined;
+      if (typeof docId !== 'string') return null;
+      const doc = findDocClip(getDocument(), docId);
+      const stack = doc ? cache.of(doc)?.stack ?? null : null;
+      return stack && stackIsActive(stack) ? stack : null;
+    },
+    apply: (source, rect, stack, time) => engine.apply(source, rect, stack, time),
+  };
+}
+
+/**
+ * The compositor's titling hook.
+ * @param getDocument current document.
+ * @param fonts the font loader (custom families are used once loaded).
+ * @returns the hook to install with `setTextEngineHook`.
+ */
+export function createTextEngineHook(getDocument: () => ProjectDocument, fonts: FontLoader | null): TextEngineHook {
+  const parsed = new WeakMap<object, AdvancedTextStyle | null>();
+  return {
+    resolve: (clip) => {
+      const docId: unknown = 'docId' in clip ? clip.docId : undefined;
+      if (typeof docId !== 'string') return null;
+      const document_ = getDocument();
+      const doc = findDocClip(document_, docId);
+      const raw = doc?.extra[ADVANCED_TEXT_KEY];
+      if (raw === undefined || raw === null || typeof raw !== 'object') return null;
+      let advanced = parsed.get(raw);
+      if (advanced === undefined) {
+        advanced = parseAdvancedText(raw);
+        parsed.set(raw, advanced);
+      }
+      if (!advanced) return null;
+      let fontFamily: string | null = null;
+      if (advanced.fontId && fonts) {
+        const font = projectFonts(document_).find((item) => item.id === advanced.fontId);
+        if (font) {
+          if (fonts.isLoaded(font.id)) fontFamily = font.family;
+          else void fonts.ensure(font);
+        }
+      }
+      return { advanced, fontFamily };
+    },
   };
 }
