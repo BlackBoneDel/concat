@@ -11,7 +11,7 @@
  * math runs inline — the output is identical.
  */
 
-import { openKeyValue, type KeyValue } from '../storage/idb.ts';
+import { MEDIA_DB_STORES, MEDIA_DB_VERSION, openKeyValue, type KeyValue } from '../storage/idb.ts';
 
 /** One resolution of peaks for one media. */
 export interface WaveformData {
@@ -145,7 +145,9 @@ export class WaveformCache {
    * @param opener how the backend is opened (tests inject failures; the
    * default is the real `ConcatMediaDB` v3 schema).
    */
-  constructor(opener: () => Promise<KeyValue> = () => openKeyValue('ConcatMediaDB', ['files', 'waveforms'])) {
+  constructor(
+    opener: () => Promise<KeyValue> = () => openKeyValue('ConcatMediaDB', [...MEDIA_DB_STORES], MEDIA_DB_VERSION),
+  ) {
     this.opener = opener;
   }
 

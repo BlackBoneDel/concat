@@ -29,7 +29,8 @@ import { generateWaveformMultiRes, WAVEFORM_RESOLUTIONS } from './media/waveform
 import { History } from './session/history.ts';
 import { MediaStore } from './storage/media-store.ts';
 import { ProjectStore } from './storage/project-store.ts';
-import { MemoryKeyValue, openKeyValue } from './storage/idb.ts';
+import { MemoryKeyValue, MEDIA_DB_STORES, MEDIA_DB_VERSION, openKeyValue } from './storage/idb.ts';
+import { KeyValueThumbnailStripStore } from './media/thumbnail-strip.ts';
 import { loadSettings, saveSettings as persistSettings, type UserSettings } from './storage/settings-store.ts';
 import { FFmpegFallback } from './media/ffmpeg/ffmpeg-fallback.ts';
 import { BulkImporter } from './media/import/bulk-importer.ts';
@@ -195,8 +196,10 @@ class EditorApp implements AppContext {
     // Fase 7+: one connection with the full v3 schema (files + waveforms) —
     // opening `files` alone left the waveforms store uncreated and every
     // waveform read/write died with NotFoundError.
-    const mediaBackend = await openKeyValue('ConcatMediaDB', ['files', 'waveforms']);
+    const mediaBackend = await openKeyValue('ConcatMediaDB', [...MEDIA_DB_STORES], MEDIA_DB_VERSION);
     this.mediaStore = new MediaStore(mediaBackend);
+    // Fase 8: the filmstrips persist in the same v4 schema.
+    this.pool.useStripStore(new KeyValueThumbnailStripStore(mediaBackend));
     // Fase 5: one v3 connection (projects + user_presets) shared by both
     // stores — a second connection at another version would block.
     const projectBackend =
@@ -344,6 +347,8 @@ class EditorApp implements AppContext {
     const item = this.toMediaItem(asset.id, asset.name, asset);
     this.session.addMediaItem(item);
     void this.generateWaveforms(file, asset.id);
+    // Fase 8: the timeline filmstrip of the new media builds in the background.
+    if (asset.type !== 'audio') void this.pool.ensureThumbnailStrip(asset.id);
     void this.media.fingerprint(id, file);
     if (info) this.media.autoProxy(id, info);
     return item;

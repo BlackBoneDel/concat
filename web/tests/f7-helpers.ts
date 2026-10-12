@@ -13,6 +13,8 @@ export interface DrawCall {
   text?: string;
   alpha: number;
   fill: string;
+  /** The stroke colour in effect when the call was logged. */
+  stroke?: string;
 }
 
 /** A 2D context double that records every call with the current alpha/fill. */
@@ -28,9 +30,21 @@ export class RecordingContext2D implements RenderContext2D {
   textAlign = 'center';
   textBaseline = 'middle';
   letterSpacing = '0px';
+  lineCap: 'butt' | 'round' | 'square' = 'butt';
+  shadowColor = '';
+  shadowBlur = 0;
+  shadowOffsetX = 0;
+  shadowOffsetY = 0;
 
   private log(op: string, args: number[], text?: string): void {
-    this.calls.push({ op, args, text, alpha: this.globalAlpha, fill: typeof this.fillStyle === 'string' ? this.fillStyle : '' });
+    this.calls.push({
+      op,
+      args,
+      text,
+      alpha: this.globalAlpha,
+      fill: typeof this.fillStyle === 'string' ? this.fillStyle : '',
+      stroke: typeof this.strokeStyle === 'string' ? this.strokeStyle : '',
+    });
   }
 
   save(): void {
@@ -75,6 +89,22 @@ export class RecordingContext2D implements RenderContext2D {
   }
   arc(x: number, y: number, r: number, start: number, end: number): void {
     this.log('arc', [x, y, r, start, end]);
+  }
+  arcTo(x1: number, y1: number, x2: number, y2: number, radius: number): void {
+    this.log('arcTo', [x1, y1, x2, y2, radius]);
+  }
+  clip(): void {
+    this.log('clip', []);
+  }
+  strokeRect(x: number, y: number, w: number, h: number): void {
+    this.log('strokeRect', [x, y, w, h]);
+  }
+  setLineDash(segments: number[]): void {
+    this.log('setLineDash', segments);
+  }
+  createLinearGradient(x0: number, y0: number, x1: number, y1: number): CanvasGradient {
+    this.log('createLinearGradient', [x0, y0, x1, y1]);
+    return { addColorStop: (offset: number, color: string) => this.log('addColorStop', [offset], color) } as unknown as CanvasGradient;
   }
   rect(x: number, y: number, w: number, h: number): void {
     this.log('rect', [x, y, w, h]);

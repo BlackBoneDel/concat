@@ -196,6 +196,18 @@ export class IndexedDbKeyValue implements KeyValue {
 export const KEY_VALUE_VERSION = 3;
 
 /**
+ * Fase 8: `ConcatMediaDB` has its own schema version. v4 adds the
+ * `thumbnail_strips` store (the filmstrip cached per media); a database held
+ * at v3 by another open connection never runs `onupgradeneeded` at the same
+ * version, so a connection missing the store would throw `NotFoundError` on
+ * every read — the `files` → `waveforms` lesson of Fase 7+.
+ */
+export const MEDIA_DB_VERSION = 4;
+
+/** Fase 8: every object store of `ConcatMediaDB`, in one place. */
+export const MEDIA_DB_STORES: readonly string[] = ['files', 'waveforms', 'thumbnail_strips'];
+
+/**
  * Opens the real backend or falls back to memory — every store in this module
  * goes through this so the app degrades in private windows instead of dying.
  * @param name database name.

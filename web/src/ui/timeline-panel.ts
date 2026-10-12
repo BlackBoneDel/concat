@@ -134,6 +134,8 @@ export class TimelinePanel {
         this.app.player.seekTo(Rational.approximate(seconds) ?? Rational.ZERO);
       },
       selection: session.selection,
+      // Fase 8: the filmstrips the clip faces paint.
+      strips: this.app.pool,
     });
 
     // Controls.
@@ -259,6 +261,7 @@ export class TimelinePanel {
     );
 
     // Keep the canvases sized and the playhead riding.
+    document.addEventListener('media-strips-changed', () => this.view?.refreshStrips(), { signal });
     document.addEventListener('timeline-changed', () => this.refreshAll(), { signal });
     document.addEventListener('selection-changed', () => this.refreshAll(), { signal });
     document.addEventListener('project-changed', () => this.refreshAll(), { signal });

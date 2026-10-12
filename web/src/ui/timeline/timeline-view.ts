@@ -24,6 +24,7 @@ import {
 } from './keyframe-track.ts';
 import type { KeyProperty } from '../../model/wire.ts';
 import { drawDropPreview, dropPreviewRect, type DropPreviewState } from './drop-preview.ts';
+import { StripRenderer } from './strip-renderer.ts';
 import { drawMarkers, drawRuler, markerAtPosition, RULER_HEIGHT } from './ruler.ts';
 import { ThumbnailRenderer } from './thumbnail-renderer.ts';
 import { drawTransitions } from './transitions-renderer.ts';
@@ -35,6 +36,7 @@ import {
   type ClipDragPreview,
   type ClipPreviewer,
   type ThemeColors,
+  type ThumbnailStripProvider,
   type TimelineViewport,
   type TrackLayout,
 } from './types.ts';
@@ -70,6 +72,8 @@ export interface TimelineViewOptions {
   setPlayhead(seconds: number): void;
   /** Selection, for the highlight. */
   selection: SelectionManager;
+  /** Fase 8: where the filmstrips inside video clips come from. */
+  strips?: ThumbnailStripProvider | null;
 }
 
 /** Geometry + rendering of one timeline. */
@@ -100,6 +104,8 @@ export class TimelineView {
   private colorSignature = '';
   private readonly waveform: WaveformRenderer;
   private readonly thumbnails: ThumbnailRenderer;
+  /** Fase 8: filmstrips of the clips' media. */
+  private readonly strips: StripRenderer;
   private dragPreviewState: ClipDragPreview | null = null;
   /** The ghost of a media card hovering the timeline (drop preview). */
   private dropPreviewState: DropPreviewState | null = null;
@@ -120,8 +126,10 @@ export class TimelineView {
     this.overlay = options.overlay;
     this.waveform = new WaveformRenderer();
     this.thumbnails = new ThumbnailRenderer(options.preview);
+    this.strips = new StripRenderer(options.strips ?? null);
     this.waveform.onUpdate(() => this.requestRender());
     this.thumbnails.onUpdate(() => this.requestRender());
+    this.strips.onUpdate(() => this.requestRender());
     this.rulerCanvas = document.createElement('canvas');
     this.rulerCanvas.className = 'tl-canvas tl-canvas-ruler';
     this.contentCanvas = document.createElement('canvas');
@@ -146,6 +154,7 @@ export class TimelineView {
     this.resizeObserver = null;
     this.waveform.clear();
     this.thumbnails.clear();
+    this.strips.clear();
     this.rulerCanvas.remove();
     this.contentCanvas.remove();
     this.playheadEl.remove();
@@ -386,6 +395,7 @@ export class TimelineView {
       document: document_,
       waveform: this.waveform,
       thumbnails: this.thumbnails,
+      strips: this.strips,
       preview: this.dragPreviewState,
       expanded: this.expandedClips,
     });
@@ -565,6 +575,28 @@ export class TimelineView {
     const button = expandButtonRect(cx, layout.y - this.viewportState.scrollTop + FACE_PADDING, w);
     if (!button) return null;
     return x >= button.x && x <= button.x + button.w && y >= button.y && y <= button.y + button.h ? clip : null;
+  }
+
+  /**
+   * Fase 8: drops every cached filmstrip and repaints — after an import, a
+   * relink or a proxy change (the media's frames are new).
+   */
+  refreshStrips(): void {
+    this.strips.refresh();
+  }
+
+  /**
+   * Fase 8: invalidates one media's filmstrip.
+   * @param mediaId the media.
+   */
+  invalidateStrip(mediaId: string): void {
+    this.strips.invalidate(mediaId);
+    this.requestRender();
+  }
+
+  /** Fase 8: the filmstrip cache (diagnostics: media still being generated). */
+  get pendingStrips(): readonly string[] {
+    return this.strips.pending;
   }
 
   /** The overlay layer (selection box, snap guides). */

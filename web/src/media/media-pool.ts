@@ -12,8 +12,10 @@
 
 import { Rational } from '../core/rational.ts';
 import type { FramePool, RenderImage } from '../render/types.ts';
+import type { ThumbnailStripProvider, TimelineThumbnailStrip } from '../ui/timeline/types.ts';
 import { MediaDecoder, type MediaFallback, type MediaInfo } from './decoder.ts';
 import { generateThumbnail, thumbnailKey, MemoryThumbnailStore, type ThumbnailStore } from './thumbnail.ts';
+import { ThumbnailStripService, type ThumbnailStripStore } from './thumbnail-strip.ts';
 
 /** A loaded asset: what the library shows and the timeline references. */
 export interface MediaAsset {
@@ -41,6 +43,8 @@ export interface MediaPoolOptions {
   preloadSeconds?: number;
   /** Fase 4: FFmpeg fallback handed to every decoder (lazy; never loaded unless needed). */
   fallback?: MediaFallback | null;
+  /** Fase 8: where the filmstrips of the timeline clips are cached. */
+  stripStore?: ThumbnailStripStore;
 }
 
 /** Fase 4: a proxy attached to an asset. */
@@ -60,14 +64,16 @@ export interface FrameRequestOptions {
   quality?: 'auto' | 'original' | 'proxy';
 }
 
-/** Runtime media pool: decoders, frames and thumbnails. */
-export class MediaPool implements FramePool {
+/** Runtime media pool: decoders, frames, thumbnails and filmstrips. */
+export class MediaPool implements FramePool, ThumbnailStripProvider {
   private readonly assets = new Map<string, MediaAsset>();
   private readonly decoders = new Map<string, MediaDecoder>();
   private readonly thumbnailStore: ThumbnailStore;
   private readonly preloadSeconds: number;
   private readonly fallback: MediaFallback | null;
   private readonly proxies = new Map<string, AttachedProxy>();
+  /** Fase 8: the filmstrip of every media (canvas reads it synchronously). */
+  readonly strips: ThumbnailStripService;
   private useProxies = true;
   // Fase 6 hook: export forces original quality while it runs.
   private forceOriginal = false;
@@ -76,6 +82,9 @@ export class MediaPool implements FramePool {
     this.thumbnailStore = options.thumbnailStore ?? new MemoryThumbnailStore();
     this.preloadSeconds = options.preloadSeconds ?? 2;
     this.fallback = options.fallback ?? null;
+    this.strips = new ThumbnailStripService({ store: options.stripStore, fallback: this.fallback });
+    // The view repaints the clip with its filmstrip as soon as it lands.
+    this.strips.onReady = () => notifyStripsChanged();
   }
 
   /**
@@ -124,6 +133,48 @@ export class MediaPool implements FramePool {
     };
     this.assets.set(id, asset);
     return asset;
+  }
+
+  /**
+   * Fase 8: swaps the durable store of the filmstrip cache (the pool is
+   * constructed before `ConcatMediaDB` is open).
+   * @param store the store to persist strips in.
+   */
+  useStripStore(store: ThumbnailStripStore): void {
+    this.strips.setStore(store);
+  }
+
+  /**
+   * Fase 8: the filmstrip of a media, as the timeline's canvas reads it.
+   * @param mediaId the media.
+   * @returns the frames plus their timing, or `null` while they build.
+   */
+  strip(mediaId: string): TimelineThumbnailStrip | null {
+    return this.strips.stripInfo(mediaId);
+  }
+
+  /**
+   * Fase 8: builds a media's filmstrip if it is not cached yet (memory, then
+   * IndexedDB, then a fresh decode of the asset's own bytes).
+   * @param mediaId the media.
+   * @returns the frames, or `null` when the asset is unknown.
+   */
+  async ensureThumbnailStrip(mediaId: string, count?: number): Promise<readonly ImageBitmap[] | null> {
+    const ready = this.strips.strip(mediaId);
+    if (ready) return ready;
+    const asset = this.assets.get(mediaId);
+    if (!asset || asset.type === 'audio') return null;
+    return this.strips.ensure(mediaId, asset.file, asset.duration, count);
+  }
+
+  /**
+   * Fase 8: the frames of a filmstrip (convenience alias of
+   * {@link strip} for callers that only want the pictures).
+   * @param mediaId the media.
+   * @returns the frames, or `null`.
+   */
+  thumbnailStrip(mediaId: string): readonly ImageBitmap[] | null {
+    return this.strips.strip(mediaId);
   }
 
   /** The decoder of an asset, or `null`. */
@@ -286,6 +337,9 @@ export class MediaPool implements FramePool {
       file,
     };
     this.assets.set(id, next);
+    // The frames changed: the cached filmstrip is stale.
+    this.strips.invalidate(id);
+    notifyStripsChanged();
     return next;
   }
 
@@ -350,6 +404,7 @@ export class MediaPool implements FramePool {
     this.decoders.get(id)?.close();
     this.decoders.delete(id);
     this.detachProxy(id);
+    this.strips.invalidate(id);
     this.assets.delete(id);
   }
 
@@ -357,6 +412,12 @@ export class MediaPool implements FramePool {
   destroy(): void {
     for (const id of [...this.assets.keys()]) this.removeMedia(id);
   }
+}
+
+/** Fase 8: tells the timeline a filmstrip changed (no-op outside a DOM). */
+function notifyStripsChanged(): void {
+  if (typeof document === 'undefined') return;
+  document.dispatchEvent(new CustomEvent('media-strips-changed'));
 }
 
 /** A bitmap as PNG bytes, for the library's `<img>` thumbnails. */
