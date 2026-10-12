@@ -85,10 +85,21 @@ export async function openDatabase(
 
 /** An IndexedDB-backed {@link KeyValue}. */
 export class IndexedDbKeyValue implements KeyValue {
-  private readonly db: IDBDatabase;
+  private db: IDBDatabase;
+  private readonly name: string;
+  private readonly stores: Set<string>;
+  /** Stores already re-opened for; a second miss is a real error. */
+  private readonly healed = new Set<string>();
 
-  constructor(db: IDBDatabase) {
+  /**
+   * @param db an open database.
+   * @param name the database name (enables the missing-store self-heal).
+   * @param stores the stores this connection expects.
+   */
+  constructor(db: IDBDatabase, name = '', stores: string[] = []) {
     this.db = db;
+    this.name = name;
+    this.stores = new Set(stores);
   }
 
   /**
@@ -100,7 +111,27 @@ export class IndexedDbKeyValue implements KeyValue {
    */
   static async open(name: string, version: number, stores: string[]): Promise<IndexedDbKeyValue | null> {
     const db = await openDatabase(name, version, stores);
-    return db ? new IndexedDbKeyValue(db) : null;
+    return db ? new IndexedDbKeyValue(db, name, stores) : null;
+  }
+
+  /**
+   * Fase 7+ schema heal: a database created by an older build (v2 of
+   * `ConcatMediaDB` knew only `files`) never runs `onupgradeneeded` when
+   * reopened at the same version, so newer stores (`waveforms`) are missing
+   * and every transaction throws `NotFoundError`. Close, reopen one version
+   * higher with the union of stores, and retry — once per store.
+   */
+  private async heal(store: string): Promise<void> {
+    if (this.healed.has(store) || this.name === '') throw new Error(`missing object store: ${store}`);
+    this.healed.add(store);
+    const stores = [...this.stores, store];
+    const previous = this.db;
+    const version = previous.version + 1;
+    previous.close();
+    const db = await openDatabase(this.name, version, stores);
+    if (!db) throw new Error(`cannot reopen ${this.name} at v${version}`);
+    this.db = db;
+    for (const created of stores) this.stores.add(created);
   }
 
   private run<T>(
@@ -109,7 +140,20 @@ export class IndexedDbKeyValue implements KeyValue {
     body: (objectStore: IDBObjectStore) => IDBRequest<T>,
   ): Promise<T> {
     return new Promise((resolve, reject) => {
-      const transaction = this.db.transaction(store, mode);
+      let transaction: IDBTransaction;
+      try {
+        transaction = this.db.transaction(store, mode);
+      } catch (error) {
+        if (error instanceof Error && error.name === 'NotFoundError') {
+          void this.heal(store).then(
+            () => this.run<T>(store, mode, body).then(resolve, reject),
+            () => reject(error),
+          );
+          return;
+        }
+        reject(error);
+        return;
+      }
       const request = body(transaction.objectStore(store));
       request.onsuccess = () => resolve(request.result);
       request.onerror = () => reject(request.error ?? new Error('indexeddb error'));
@@ -142,12 +186,23 @@ export class IndexedDbKeyValue implements KeyValue {
 }
 
 /**
+ * The schema version of the simple key/value databases.
+ *
+ * v3 (Fase 7+) adds the `waveforms` store to `ConcatMediaDB`; databases
+ * created at v2 with only `files` never saw an upgrade, so the version has
+ * to move for the store to exist (and {@link IndexedDbKeyValue} self-heals
+ * any connection that still misses one).
+ */
+export const KEY_VALUE_VERSION = 3;
+
+/**
  * Opens the real backend or falls back to memory — every store in this module
  * goes through this so the app degrades in private windows instead of dying.
  * @param name database name.
  * @param stores object store names.
+ * @param version schema version (default {@link KEY_VALUE_VERSION}).
  * @returns a working backend.
  */
-export async function openKeyValue(name: string, stores: string[]): Promise<KeyValue> {
-  return (await IndexedDbKeyValue.open(name, 2, stores)) ?? new MemoryKeyValue();
+export async function openKeyValue(name: string, stores: string[], version: number = KEY_VALUE_VERSION): Promise<KeyValue> {
+  return (await IndexedDbKeyValue.open(name, version, stores)) ?? new MemoryKeyValue();
 }

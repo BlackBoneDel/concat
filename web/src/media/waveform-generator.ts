@@ -139,11 +139,20 @@ async function computePeaks(samples: Float32Array, samplesPerPixel: number): Pro
 /** The waveform cache (IndexedDB `ConcatMediaDB` store `waveforms`). */
 export class WaveformCache {
   private backend: KeyValue | null = null;
+  private readonly opener: () => Promise<KeyValue>;
+
+  /**
+   * @param opener how the backend is opened (tests inject failures; the
+   * default is the real `ConcatMediaDB` v3 schema).
+   */
+  constructor(opener: () => Promise<KeyValue> = () => openKeyValue('ConcatMediaDB', ['files', 'waveforms'])) {
+    this.opener = opener;
+  }
 
   /** Opens the cache lazily; memory fallback when IndexedDB is gone. */
   private async store(): Promise<KeyValue> {
     if (!this.backend) {
-      this.backend = await openKeyValue('ConcatMediaDB', ['files', 'waveforms']);
+      this.backend = await this.opener();
     }
     return this.backend;
   }
@@ -151,30 +160,43 @@ export class WaveformCache {
   /**
    * @param mediaId the media.
    * @param samplesPerPixel the resolution.
-   * @returns the cached peaks, or `null`.
+   * @returns the cached peaks, or `null` — including when the backend is
+   * broken (Fase 7+: a missing `waveforms` store must never break playback,
+   * the peaks are simply regenerated and not remembered).
    */
   async get(mediaId: string, samplesPerPixel: number): Promise<WaveformData | null> {
-    const backend = await this.store();
-    const key = cacheKey(mediaId, samplesPerPixel);
-    const raw = await backend.get<WaveformData>('waveforms', key);
-    if (!raw || !(raw.data instanceof Float32Array)) return null;
-    return raw;
+    try {
+      const backend = await this.store();
+      const raw = await backend.get<WaveformData>('waveforms', cacheKey(mediaId, samplesPerPixel));
+      if (!raw || !(raw.data instanceof Float32Array)) return null;
+      return raw;
+    } catch {
+      return null;
+    }
   }
 
   /**
-   * Stores peaks for later.
+   * Stores peaks for later — best effort: a broken backend is ignored.
    * @param data the peaks to remember.
    */
   async put(data: WaveformData): Promise<void> {
-    const backend = await this.store();
-    await backend.put('waveforms', cacheKey(data.mediaId, data.samplesPerPixel), data);
+    try {
+      const backend = await this.store();
+      await backend.put('waveforms', cacheKey(data.mediaId, data.samplesPerPixel), data);
+    } catch {
+      // The cache is an optimization, never a hard dependency.
+    }
   }
 
   /** Forgets one media's peaks. */
   async delete(mediaId: string): Promise<void> {
-    const backend = await this.store();
-    for (const samplesPerPixel of WAVEFORM_RESOLUTIONS) {
-      await backend.delete('waveforms', cacheKey(mediaId, samplesPerPixel));
+    try {
+      const backend = await this.store();
+      for (const samplesPerPixel of WAVEFORM_RESOLUTIONS) {
+        await backend.delete('waveforms', cacheKey(mediaId, samplesPerPixel));
+      }
+    } catch {
+      // Nothing to forget when the backend never worked.
     }
   }
 }
