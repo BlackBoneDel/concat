@@ -1,0 +1,28 @@
+{
+  "name": "Concat — Editor de vídeo local",
+  "short_name": "Concat",
+  "description": "Editor de vídeo 100 % local en el navegador. Sin nube, sin telemetría.",
+  "lang": "es",
+  "dir": "ltr",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "display_override": ["window-controls-overlay", "standalone"],
+  "orientation": "any",
+  "background_color": "#14161b",
+  "theme_color": "#14161b",
+  "categories": ["productivity", "multimedia", "video"],
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ],
+  "file_handlers": [
+    {
+      "action": "./",
+      "accept": { "application/zip": [".concatpkg.zip"] }
+    }
+  ]
+}

@@ -1,0 +1,538 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Jareer and Concat contributors
+
+/**
+ * The header bar: brand, menus, project identity, save state, undo/redo,
+ * theme toggle and the settings/shortcuts modals. Menus are modal pickers —
+ * keyboard reachable, no hover-only chrome.
+ *
+ * Fase 4: proxy toggle (Ctrl+Shift+P) and File-menu entries for folder,
+ * subtitle and LUT import, subtitle export, proxies and relinking.
+ */
+
+import { DEFAULT_SHORTCUTS } from './shortcuts.ts';
+import { THEMES, type ThemeName } from './theme-manager.ts';
+import { Modal } from './modal.ts';
+import type { AppContext } from './app-context.ts';
+import markUrl from '../assets/concat-mark.png';
+import { getMediaTools } from './media-tools.ts';
+import { getProductionServices } from './production-services.ts';
+import { icon, iconButton, setButtonIcon, type IconName } from './components/icons.ts';
+
+/** Fase 7: the glyph of each palette on the theme toggle. */
+const THEME_ICONS: Record<ThemeName, IconName> = { dark: 'moon', light: 'sun', cyberpunk: 'zap' };
+
+/** Fase 6 shortcut of the export dialog (bound in main.ts). */
+export const EXPORT_SHORTCUT = 'Ctrl+E';
+
+/** Fase 4 shortcut of the proxy toggle (bound in main.ts). */
+export const PROXY_TOGGLE_SHORTCUT = 'Ctrl+Shift+P';
+
+/** Human-readable byte count for the project list. */
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/** The 48px top bar of the shell. */
+export class HeaderBar {
+  private readonly root: HTMLElement;
+  private readonly ctx: AppContext;
+  private readonly saveState: HTMLElement;
+  private readonly projectName: HTMLElement;
+  private readonly proxyToggle: HTMLButtonElement;
+  /** Fase 6 hook: the Export button. */
+  private readonly exportButton: HTMLButtonElement;
+  /** Fase 7: the theme toggle (sun / moon / zap per palette). */
+  private readonly themeButton: HTMLButtonElement;
+
+  /**
+   * @param root the header element.
+   * @param ctx the app services.
+   */
+  constructor(root: HTMLElement, ctx: AppContext) {
+    this.root = root;
+    this.ctx = ctx;
+
+    // Brand.
+    const brand = document.createElement('div');
+    brand.className = 'header-brand';
+    const mark = document.createElement('img');
+    mark.className = 'header-mark';
+    mark.src = markUrl;
+    mark.alt = 'Concat';
+    brand.appendChild(mark);
+    const name = document.createElement('span');
+    name.className = 'header-title';
+    name.textContent = 'Concat';
+    brand.appendChild(name);
+    this.root.appendChild(brand);
+
+    // Menus.
+    const menus = document.createElement('nav');
+    menus.className = 'header-menus';
+    menus.appendChild(this.menuButton('Archivo', () => this.openFileMenu(), 'menu'));
+    menus.appendChild(this.menuButton('Edición', () => this.openEditMenu(), 'pen'));
+    menus.appendChild(this.menuButton('Ajustes', () => this.openSettingsModal(), 'settings'));
+    // Fase 6 hook: the searchable shortcut sheet when installed.
+    menus.appendChild(this.menuButton('Atajos', () => {
+      const production = getProductionServices();
+      if (production) production.openShortcuts();
+      else this.openShortcutsModal();
+    }, 'keyboard'));
+    this.root.appendChild(menus);
+
+    // Project identity.
+    const identity = document.createElement('div');
+    identity.className = 'header-identity';
+    this.projectName = document.createElement('span');
+    this.projectName.className = 'header-project';
+    this.projectName.textContent = this.ctx.session.name;
+    identity.appendChild(this.projectName);
+    this.saveState = document.createElement('span');
+    this.saveState.className = 'header-save-state';
+    this.saveState.textContent = 'Guardado';
+    identity.appendChild(this.saveState);
+    this.root.appendChild(identity);
+
+    // Actions.
+    const actions = document.createElement('div');
+    actions.className = 'header-actions';
+    // Fase 7 hook: SVG icon buttons.
+    const undo = this.actionButton('undo', 'Deshacer', 'Ctrl+Z', () => this.undo());
+    const redo = this.actionButton('redo', 'Rehacer', 'Ctrl+Shift+Z', () => this.redo());
+    actions.appendChild(undo);
+    actions.appendChild(redo);
+    actions.appendChild(this.actionButton('save', 'Guardar', 'Ctrl+S', () => void this.ctx.saveProject()));
+    // Fase 4: proxy playback toggle.
+    this.proxyToggle = document.createElement('button');
+    this.proxyToggle.type = 'button';
+    this.proxyToggle.className = 'btn btn-ghost btn-small header-toggle';
+    this.proxyToggle.textContent = 'Proxy';
+    this.proxyToggle.title = `Previsualizar con proxies (${PROXY_TOGGLE_SHORTCUT})`;
+    this.proxyToggle.setAttribute('aria-pressed', 'false');
+    this.proxyToggle.addEventListener('click', () => {
+      getMediaTools()?.toggleProxies();
+      this.syncProxyToggle();
+    });
+    actions.appendChild(this.proxyToggle);
+    this.themeButton = this.actionButton(THEME_ICONS[this.ctx.theme.theme], 'Cambiar tema', undefined, () => {
+      const order: ThemeName[] = ['dark', 'light', 'cyberpunk'];
+      const next = order[(order.indexOf(this.ctx.theme.theme) + 1) % order.length] ?? 'dark';
+      this.ctx.theme.apply(next, (theme) => {
+        this.ctx.settings.theme = theme;
+        this.ctx.saveSettings();
+      });
+      this.syncThemeIcon();
+    });
+    actions.appendChild(this.themeButton);
+    this.syncThemeIcon();
+    // Fase 6 hook: Export (Ctrl/Cmd+E), disabled while the timeline is empty.
+    this.exportButton = iconButton({
+      icon: 'export',
+      label: 'Exportar vídeo',
+      shortcut: EXPORT_SHORTCUT,
+      text: 'Exportar',
+      className: 'header-export',
+      onClick: () => getProductionServices()?.openExport(),
+    });
+    this.exportButton.setAttribute('aria-keyshortcuts', 'Control+E Meta+E');
+    actions.appendChild(this.exportButton);
+    this.root.appendChild(actions);
+
+    for (const name of ['timeline-changed', 'session-changed', 'production-ready']) {
+      document.addEventListener(name, () => this.syncExport());
+    }
+    document.addEventListener('project-changed', () => this.sync());
+    document.addEventListener('media-proxy-changed', () => this.syncProxyToggle());
+    this.sync();
+    this.syncProxyToggle();
+  }
+
+  /** Fase 4: reflects the proxy toggle state. */
+  syncProxyToggle(): void {
+    const tools = getMediaTools();
+    this.proxyToggle.disabled = tools === null;
+    this.proxyToggle.setAttribute('aria-pressed', String(tools?.proxiesEnabled ?? false));
+  }
+
+  /** Fase 6 hook: enables Export only when there is something to export. */
+  syncExport(): void {
+    const production = getProductionServices();
+    const enabled = production?.canExport() ?? false;
+    this.exportButton.disabled = !enabled;
+    this.exportButton.title = enabled ? `Exportar vídeo (${EXPORT_SHORTCUT})` : 'Añade clips a la línea de tiempo para exportar';
+  }
+
+  /** Reflects name and dirty state. */
+  sync(): void {
+    this.syncExport();
+    this.syncThemeIcon();
+    this.projectName.textContent = this.ctx.session.name;
+    this.saveState.textContent = this.ctx.session.dirty ? 'Cambios sin guardar' : 'Guardado';
+    this.saveState.classList.toggle('dirty', this.ctx.session.dirty);
+    this.projectName.title = 'Proyecto — pulsa para renombrar';
+  }
+
+  /** Marks a completed save with a toast and the "Guardado" state. */
+  markSaved(): void {
+    this.sync();
+    this.ctx.notifications.success('Guardado', 'Proyecto guardado localmente.');
+  }
+
+  // -- internals -----------------------------------------------------------
+
+  private menuButton(label: string, onClick: () => void, glyph?: IconName): HTMLElement {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'header-menu';
+    // Fase 7 hook: a leading SVG glyph; the text stays the accessible name.
+    if (glyph) button.appendChild(icon(glyph, { size: 15 }));
+    button.append(label);
+    button.addEventListener('click', onClick);
+    return button;
+  }
+
+  private actionButton(glyph: IconName, label: string, shortcut: string | undefined, onClick: () => void): HTMLButtonElement {
+    return iconButton({ icon: glyph, label, shortcut, onClick: () => onClick() });
+  }
+
+  /** Fase 7: the theme button shows the active palette. */
+  private syncThemeIcon(): void {
+    const theme = this.ctx.theme.theme;
+    setButtonIcon(this.themeButton, THEME_ICONS[theme]);
+    const names: Record<ThemeName, string> = { dark: 'oscuro', light: 'claro', cyberpunk: 'cyberpunk' };
+    this.themeButton.title = `Tema ${names[theme]} — pulsa para cambiar`;
+  }
+
+  private openFileMenu(): void {
+    const list = document.createElement('div');
+    list.className = 'menu-list';
+    list.appendChild(this.menuItem('Nuevo proyecto', 'Ctrl+N', () => void this.newProject()));
+    list.appendChild(this.menuItem('Abrir proyecto…', 'Ctrl+O', () => this.openProjectModal()));
+    list.appendChild(this.menuItem('Guardar', 'Ctrl+S', () => void this.ctx.saveProject()));
+    list.appendChild(this.menuItem('Importar medios…', 'Ctrl+I', () => document.dispatchEvent(new CustomEvent('open-import'))));
+    // Fase 4 entries.
+    const tools = getMediaTools();
+    if (tools) {
+      list.appendChild(this.menuItem('Importar carpeta…', '', () => tools.importFolder()));
+      list.appendChild(this.menuItem('Importar subtítulos…', '.srt / .vtt', () => this.pickFile('.srt,.vtt', (file) => void tools.importSubtitles(file))));
+      list.appendChild(this.menuItem('Exportar subtítulos SRT', '', () => tools.exportSubtitles('srt')));
+      list.appendChild(this.menuItem('Exportar subtítulos VTT', '', () => tools.exportSubtitles('vtt')));
+      list.appendChild(this.menuItem('Cargar LUT…', '.cube', () => this.pickFile('.cube', (file) => void tools.importLut(file))));
+      list.appendChild(this.menuItem('Gestor de proxies…', PROXY_TOGGLE_SHORTCUT + ' alterna', () => tools.openProxyManager()));
+      list.appendChild(this.menuItem('Medios sin conexión…', '', () => tools.openRelink()));
+    }
+    // Fase 6 entries.
+    const production = getProductionServices();
+    if (production) {
+      const exportItem = this.menuItem('Exportar vídeo…', EXPORT_SHORTCUT, () => production.openExport());
+      if (exportItem instanceof HTMLButtonElement) exportItem.disabled = !production.canExport();
+      list.appendChild(exportItem);
+      list.appendChild(this.menuItem('Paquete de proyecto (.zip)…', '', () => production.openProjectPackage()));
+      list.appendChild(this.menuItem('Almacenamiento local…', '', () => production.openStorageManager()));
+      if (production.canInstall()) list.appendChild(this.menuItem('Instalar Concat como aplicación', '', () => production.install()));
+    }
+    this.openMenu = new Modal('Archivo', list);
+  }
+
+  private openEditMenu(): void {
+    const list = document.createElement('div');
+    list.className = 'menu-list';
+    list.appendChild(this.menuItem('Deshacer', 'Ctrl+Z', () => this.undo()));
+    list.appendChild(this.menuItem('Rehacer', 'Ctrl+Shift+Z', () => this.redo()));
+    list.appendChild(
+      this.menuItem('Eliminar selección', 'Delete', () => {
+        const id = this.ctx.selectedClipId;
+        if (id) {
+          this.ctx.history.push(this.ctx.session.document, this.ctx.session.documentSettings());
+          this.ctx.session.removeClip(id);
+          this.ctx.selectClip(null);
+          this.ctx.session.dirty = true;
+          this.ctx.requestRender();
+          this.ctx.requestAutosave();
+          document.dispatchEvent(new CustomEvent('timeline-changed'));
+        }
+      }),
+    );
+    this.openMenu = new Modal('Edición', list);
+  }
+
+  /** Opens a one-file picker (Fase 4). */
+  private pickFile(accept: string, onFile: (file: File) => void): void {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = accept;
+    input.addEventListener('change', () => {
+      const file = input.files?.[0];
+      if (file) onFile(file);
+    });
+    input.click();
+  }
+
+  private menuItem(label: string, combo: string, onClick: () => void): HTMLElement {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'menu-item';
+    const text = document.createElement('span');
+    text.textContent = label;
+    const shortcut = document.createElement('span');
+    shortcut.className = 'menu-combo';
+    shortcut.textContent = combo;
+    button.appendChild(text);
+    button.appendChild(shortcut);
+    button.addEventListener('click', () => {
+      this.openMenu?.close();
+      this.openMenu = null;
+      onClick();
+    });
+    return button;
+  }
+
+  /** The menu modal currently open, so items can close it. */
+  private openMenu: Modal | null = null;
+
+  private async newProject(): Promise<void> {
+    const ok = await this.ctx.notifications.confirm(
+      'Nuevo proyecto',
+      'Se descartarán los cambios sin guardar del proyecto actual.',
+      'Crear',
+    );
+    if (!ok) return;
+    this.ctx.history.clear();
+    // The main wiring owns the session instance; it swaps in a fresh
+    // document when this lands.
+    document.dispatchEvent(new CustomEvent('session-reset'));
+    this.ctx.notifications.info('Nuevo proyecto', 'Timeline vacío listo.');
+  }
+
+  private async openProjectModal(): Promise<void> {
+    const projects = await this.ctx.projectStore.listProjects();
+    const list = document.createElement('div');
+    list.className = 'menu-list';
+    if (projects.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'modal-message';
+      empty.textContent = 'No hay proyectos guardados.';
+      list.appendChild(empty);
+    }
+    for (const project of projects) {
+      const row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'menu-item project-row';
+      const text = document.createElement('span');
+      text.textContent = project.name;
+      const when = document.createElement('span');
+      when.className = 'menu-combo';
+      when.textContent = `${new Date(project.lastModified).toLocaleString()} · ${formatBytes(project.fileSize)}`;
+      row.appendChild(text);
+      row.appendChild(when);
+      row.addEventListener('click', () => {
+        document.querySelectorAll('.modal-backdrop').forEach((node) => node.remove());
+        void this.ctx.openProject(project.id);
+      });
+      list.appendChild(row);
+    }
+    new Modal('Abrir proyecto', list);
+  }
+
+  private undo(): void {
+    const restored = this.ctx.history.undo(this.ctx.session.document, this.ctx.session.documentSettings());
+    if (!restored) {
+      // Fase 5: inspector/timeline edits live in the edit session's history
+      // (the same one Ctrl+Z drives from the timeline).
+      const session = this.ctx.editSession;
+      if (session?.history.canUndo()) {
+        session.undo();
+        this.ctx.requestRender();
+        document.dispatchEvent(new CustomEvent('timeline-changed'));
+        document.dispatchEvent(new CustomEvent('selection-changed'));
+        return;
+      }
+      this.ctx.notifications.info('Nada que deshacer');
+      return;
+    }
+    this.ctx.session.document = restored;
+    this.ctx.session.rebuild();
+    this.ctx.session.dirty = true;
+    this.ctx.requestRender();
+    document.dispatchEvent(new CustomEvent('timeline-changed'));
+    document.dispatchEvent(new CustomEvent('selection-changed'));
+  }
+
+  private redo(): void {
+    const restored = this.ctx.history.redo(this.ctx.session.document, this.ctx.session.documentSettings());
+    if (!restored) {
+      // Fase 5: inspector/timeline edits live in the edit session's history
+      // (the same one Ctrl+Z drives from the timeline).
+      const session = this.ctx.editSession;
+      if (session?.history.canRedo()) {
+        session.redo();
+        this.ctx.requestRender();
+        document.dispatchEvent(new CustomEvent('timeline-changed'));
+        document.dispatchEvent(new CustomEvent('selection-changed'));
+        return;
+      }
+      this.ctx.notifications.info('Nada que rehacer');
+      return;
+    }
+    this.ctx.session.document = restored;
+    this.ctx.session.rebuild();
+    this.ctx.session.dirty = true;
+    this.ctx.requestRender();
+    document.dispatchEvent(new CustomEvent('timeline-changed'));
+    document.dispatchEvent(new CustomEvent('selection-changed'));
+  }
+
+  private openSettingsModal(): void {
+    const form = document.createElement('div');
+    form.className = 'settings-form';
+
+    const themeRow = this.selectRow(form, 'Tema', this.ctx.settings.theme, THEMES.map((theme) => theme.name), (value) => {
+      this.ctx.theme.apply(value as ThemeName, (theme) => {
+        this.ctx.settings.theme = theme;
+      });
+    });
+    void themeRow;
+    this.selectRow(form, 'Idioma', this.ctx.settings.language, ['en', 'es'], (value) => {
+      this.ctx.settings.language = value as 'en' | 'es';
+    });
+    this.selectRow(form, 'Calidad de previsualización', this.ctx.settings.previewQuality, ['full', 'half', 'quarter'], (value) => {
+      this.ctx.settings.previewQuality = value as 'full' | 'half' | 'quarter';
+      document.dispatchEvent(new CustomEvent('preview-quality-changed'));
+    });
+    this.numberRow(form, 'Autoguardado (s)', this.ctx.settings.autosaveInterval, 5, 600, (value) => {
+      this.ctx.settings.autosaveInterval = value;
+    });
+    this.numberRow(form, 'Duración por defecto de clip (s)', this.ctx.settings.defaultClipDuration, 0.1, 3600, (value) => {
+      this.ctx.settings.defaultClipDuration = value;
+    });
+    this.numberRow(form, 'Transición por defecto (s)', this.ctx.settings.defaultTransitionDuration, 0, 60, (value) => {
+      this.ctx.settings.defaultTransitionDuration = value;
+    });
+    this.numberRow(form, 'Tamaño de rejilla (px)', this.ctx.settings.gridSize, 1, 256, (value) => {
+      this.ctx.settings.gridSize = value;
+    });
+    this.checkRow(form, 'Aceleración por hardware', this.ctx.settings.hardwareAcceleration, (value) => {
+      this.ctx.settings.hardwareAcceleration = value;
+    });
+    this.checkRow(form, 'Mostrar notificaciones', this.ctx.settings.showTooltips, (value) => {
+      this.ctx.settings.showTooltips = value;
+      this.ctx.notifications.setEnabled(value);
+    });
+    this.checkRow(form, 'Imán a rejilla', this.ctx.settings.snapToGrid, (value) => {
+      this.ctx.settings.snapToGrid = value;
+    });
+
+    new Modal('Configuración', form, {
+      confirmLabel: 'Aplicar',
+      cancelLabel: 'Cerrar',
+      onConfirm: () => {
+        this.ctx.saveSettings();
+        this.ctx.notifications.success('Configuración', 'Ajustes aplicados.');
+      },
+    });
+  }
+
+  private openShortcutsModal(): void {
+    const list = document.createElement('div');
+    list.className = 'menu-list';
+    for (const [action, combo] of Object.entries(DEFAULT_SHORTCUTS)) {
+      const row = document.createElement('div');
+      row.className = 'menu-item';
+      const text = document.createElement('span');
+      text.textContent = action;
+      const shortcut = document.createElement('span');
+      shortcut.className = 'menu-combo';
+      shortcut.textContent = combo;
+      row.appendChild(text);
+      row.appendChild(shortcut);
+      list.appendChild(row);
+    }
+    // Fase 4: the proxy toggle.
+    const proxyRow = document.createElement('div');
+    proxyRow.className = 'menu-item';
+    const proxyText = document.createElement('span');
+    proxyText.textContent = 'toggleProxies';
+    const proxyCombo = document.createElement('span');
+    proxyCombo.className = 'menu-combo';
+    proxyCombo.textContent = PROXY_TOGGLE_SHORTCUT;
+    proxyRow.append(proxyText, proxyCombo);
+    list.appendChild(proxyRow);
+    new Modal('Atajos de teclado', list);
+  }
+
+  // -- small form builders -------------------------------------------------
+
+  private selectRow(
+    form: HTMLElement,
+    label: string,
+    value: string,
+    options: readonly string[],
+    onChange: (value: string) => void,
+  ): HTMLElement {
+    const row = document.createElement('label');
+    row.className = 'field-row';
+    const text = document.createElement('span');
+    text.className = 'field-label';
+    text.textContent = label;
+    const select = document.createElement('select');
+    select.className = 'field-input';
+    for (const optionValue of options) {
+      const option = document.createElement('option');
+      option.value = optionValue;
+      option.textContent = optionValue;
+      select.appendChild(option);
+    }
+    select.value = value;
+    select.addEventListener('change', () => onChange(select.value));
+    row.appendChild(text);
+    row.appendChild(select);
+    form.appendChild(row);
+    return row;
+  }
+
+  private numberRow(
+    form: HTMLElement,
+    label: string,
+    value: number,
+    min: number,
+    max: number,
+    onChange: (value: number) => void,
+  ): void {
+    const row = document.createElement('label');
+    row.className = 'field-row';
+    const text = document.createElement('span');
+    text.className = 'field-label';
+    text.textContent = label;
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'field-input';
+    input.min = String(min);
+    input.max = String(max);
+    input.step = '1';
+    input.value = String(value);
+    input.addEventListener('change', () => {
+      if (input.reportValidity()) onChange(Number(input.value));
+    });
+    row.appendChild(text);
+    row.appendChild(input);
+    form.appendChild(row);
+  }
+
+  private checkRow(form: HTMLElement, label: string, checked: boolean, onChange: (value: boolean) => void): void {
+    const row = document.createElement('label');
+    row.className = 'field-row field-row-check';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = checked;
+    input.addEventListener('change', () => onChange(input.checked));
+    const text = document.createElement('span');
+    text.className = 'field-label';
+    text.textContent = label;
+    row.appendChild(input);
+    row.appendChild(text);
+    form.appendChild(row);
+  }
+}

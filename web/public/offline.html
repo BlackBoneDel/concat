@@ -1,0 +1,44 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: AGPL-3.0-or-later -->
+<!-- SPDX-FileCopyrightText: 2026 Jareer and Concat contributors -->
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#14161b" />
+    <title>Concat — sin conexión</title>
+    <style>
+      :root { color-scheme: dark light; }
+      body {
+        margin: 0; min-height: 100vh; display: grid; place-items: center;
+        background: #14161b; color: #e8eaf0;
+        font: 15px/1.5 "Segoe UI", Inter, "Helvetica Neue", Arial, sans-serif;
+      }
+      main { max-width: 32rem; padding: 2rem; text-align: center; }
+      img { width: 96px; height: 96px; border-radius: 20px; }
+      h1 { font-size: 1.4rem; margin: 1rem 0 0.5rem; }
+      p { color: #9aa3b2; }
+      button {
+        margin-top: 1rem; padding: 0.6rem 1.2rem; border: 0; border-radius: 6px;
+        background: #4f8cff; color: #fff; font: inherit; cursor: pointer;
+      }
+      button:focus-visible { outline: 2px solid #fff; outline-offset: 2px; }
+      @media (prefers-color-scheme: light) {
+        body { background: #f4f5f8; color: #1a1d24; }
+        p { color: #5b6473; }
+      }
+    </style>
+  </head>
+  <body>
+    <main>
+      <img src="icons/icon-192.png" alt="" />
+      <h1>Sin conexión</h1>
+      <p>
+        Esta página aún no estaba guardada para usarse sin conexión. Tus proyectos y medios siguen
+        en este navegador: vuelve a intentarlo cuando tengas red, o abre Concat desde el icono
+        instalado.
+      </p>
+      <button type="button" onclick="location.reload()">Reintentar</button>
+    </main>
+  </body>
+</html>
