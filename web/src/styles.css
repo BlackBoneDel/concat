@@ -2299,3 +2299,58 @@ body {
 .header-menu .concat-icon {
   color: var(--text-secondary);
 }
+
+/* -- Fase 7+: timeline file drops + ?debug=1 diagnostics panel ---------- */
+
+.panel-timeline.drag-over {
+  outline: 1px dashed var(--accent);
+  outline-offset: -4px;
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.debug-panel {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 4000;
+  max-width: 420px;
+  max-height: 60vh;
+  overflow-y: auto;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 10px 12px;
+  font-size: 12px;
+  color: var(--text);
+  box-shadow: 0 8px 24px rgb(0 0 0 / 45%);
+}
+.debug-panel-title {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-weight: 600;
+  margin-bottom: 6px;
+}
+.debug-panel-close {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font-size: 16px;
+  line-height: 1;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+.debug-panel dl {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: 3px 10px;
+  margin: 0;
+}
+.debug-panel dt {
+  color: var(--text-muted);
+}
+.debug-panel dd {
+  margin: 0;
+  word-break: break-word;
+}

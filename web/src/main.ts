@@ -68,6 +68,9 @@ import { parseCube, toCube } from './media/vision/lut-loader.ts';
 import { fontFileName, OpfsFontFiles } from './storage/font-store.ts';
 import { openProxyStorage } from './storage/proxy-store.ts';
 import { waveformCache } from './media/waveform-generator.ts';
+// Fase 7+: timeline drop capture and the ?debug=1 diagnostics panel.
+import { installDropGuard, installFileDrop } from './ui/timeline/file-drop.ts';
+import { mountDebugPanel } from './ui/debug-panel.ts';
 import { formatEta } from './export/bitrate-estimator.ts';
 import type { OpenedPackage } from './storage/project-package.ts';
 import type { StorageCategory } from './ui/modals/storage-manager-modal.ts';
@@ -189,7 +192,10 @@ class EditorApp implements AppContext {
     };
 
     // Storage backends (real IndexedDB + OPFS when available).
-    const mediaBackend = await openKeyValue('ConcatMediaDB', ['files']);
+    // Fase 7+: one connection with the full v3 schema (files + waveforms) —
+    // opening `files` alone left the waveforms store uncreated and every
+    // waveform read/write died with NotFoundError.
+    const mediaBackend = await openKeyValue('ConcatMediaDB', ['files', 'waveforms']);
     this.mediaStore = new MediaStore(mediaBackend);
     // Fase 5: one v3 connection (projects + user_presets) shared by both
     // stores — a second connection at another version would block.
@@ -243,6 +249,17 @@ class EditorApp implements AppContext {
     this.canvasRef.attach(preview.renderCanvas);
     this.timelinePanel = new TimelinePanel(layout.timelinePanel, this);
     this.inspectorPanel = new InspectorPanel(layout.inspectorPanel, this);
+
+    // Fase 7+: OS file drops on the timeline import into the library, and a
+    // window-level guard stops the browser navigating away on any other
+    // drop (the old behaviour opened the raw file and lost the session).
+    installFileDrop(layout.timelinePanel, {
+      onFiles: (files) => void this.importFiles(files),
+    });
+    installDropGuard();
+    // Fase 7+: `?debug=1` mounts the diagnostics panel (engine, codecs,
+    // OPFS/IndexedDB, service worker caches) for import troubleshooting.
+    void mountDebugPanel(document.body);
 
     // Fase 4: media tools, effect hooks.
     setMediaTools(this.media);
