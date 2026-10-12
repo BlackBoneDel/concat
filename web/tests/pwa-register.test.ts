@@ -209,3 +209,32 @@ describe('public PWA files', () => {
     expect(read('offline.html')).toContain('Sin conexión');
   });
 });
+
+// -- Fase 7+: invalidación del cache del SW a v7 ---------------------------
+
+import { SW_CACHE_VERSION } from '../src/pwa/sw-register.ts';
+
+describe('service-worker cache v7', () => {
+  const readSw = (): string => readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
+
+  it('declara CACHE_VERSION v7', () => {
+    expect(readSw()).toMatch(/const CACHE_VERSION = 'v7';/);
+    expect(SW_CACHE_VERSION).toBe('v7');
+  });
+
+  it('los nombres de cache incluyen la versión y el build id', () => {
+    const sw = readSw();
+    expect(sw).toContain('concat-${CACHE_VERSION}-${BUILD_ID}');
+    expect(sw).toContain('concat-runtime-${CACHE_VERSION}-${BUILD_ID}');
+  });
+
+  it('activate purga todo cache concat-* que no sea el vigente', () => {
+    const sw = readSw();
+    expect(sw).toMatch(/const keep = new Set\(\[CACHE, RUNTIME\]\)/);
+    expect(sw).toMatch(/key\.startsWith\('concat-'\) && !keep\.has\(key\)/);
+  });
+
+  it('SW_CACHE_VERSION coincide con la constante del sw.js publicado', () => {
+    expect(readSw()).toContain(`const CACHE_VERSION = '${SW_CACHE_VERSION}';`);
+  });
+});

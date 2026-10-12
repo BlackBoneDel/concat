@@ -276,3 +276,150 @@ describe('Caso límite 3 — exportación 0×0 / 0 fps', () => {
     }
   });
 });
+
+// -- Fase 7+: panel de diagnóstico ?debug=1 --------------------------------
+
+import {
+  collectDiagnostics,
+  debugEnabled,
+  detectEngineName,
+  mountDebugPanel,
+  renderDebugPanel,
+  type DebugEnvironment,
+  type DebugInfo,
+} from '../src/ui/debug-panel.ts';
+
+const FIREFOX_UA = 'Mozilla/5.0 (X11; Linux x86_64; rv:128.0) Gecko/20100101 Firefox/128.0';
+const CHROME_UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+const SAFARI_UA = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 14_5) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15';
+
+/** An OPFS double; `writable` toggles the Safari 17 gap. */
+function fakeOpfs(writable: boolean, removed: string[] = []) {
+  return {
+    getDirectory: async () => ({
+      getDirectoryHandle: async () => ({
+        getFileHandle: async () => (writable ? { createWritable: async () => undefined } : {}),
+        removeEntry: async (name: string) => void removed.push(name),
+      }),
+    }),
+  };
+}
+
+function env(overrides: Partial<DebugEnvironment> = {}): DebugEnvironment {
+  return {
+    userAgent: FIREFOX_UA,
+    probe: { canPlayType: () => '' },
+    storage: null,
+    indexedDb: true,
+    serviceWorker: null,
+    cacheKeys: async () => ['concat-v7-abc', 'concat-runtime-v7-abc'],
+    webcodecs: { videoDecoder: true, videoEncoder: false },
+    ...overrides,
+  };
+}
+
+describe('panel de diagnóstico ?debug=1', () => {
+  it('debugEnabled solo activa con debug=1', () => {
+    expect(debugEnabled('?debug=1')).toBe(true);
+    expect(debugEnabled('?debug=0')).toBe(false);
+    expect(debugEnabled('?debug')).toBe(false);
+    expect(debugEnabled('')).toBe(false);
+    expect(debugEnabled('?other=1')).toBe(false);
+    expect(debugEnabled('?a=1&debug=1&b=2')).toBe(true);
+  });
+
+  it('detectEngineName reconoce los tres motores', () => {
+    expect(detectEngineName(FIREFOX_UA)).toBe('firefox');
+    expect(detectEngineName(CHROME_UA)).toBe('chromium');
+    expect(detectEngineName(SAFARI_UA)).toBe('safari');
+    expect(detectEngineName('some-crawler/1.0')).toBe('chromium');
+  });
+
+  it('collectDiagnostics informa motor, WebCodecs, caches y versión v7', async () => {
+    const info = await collectDiagnostics(env());
+    expect(info.engine).toBe('firefox');
+    expect(info.videoDecoder).toBe(true);
+    expect(info.videoEncoder).toBe(false);
+    expect(info.indexedDb).toBe(true);
+    expect(info.cacheVersion).toBe('v7');
+    expect(info.caches).toEqual(['concat-v7-abc', 'concat-runtime-v7-abc']);
+    // jsdom-style probe ('' to everything) → the documented baseline matrix.
+    expect(info.containers).toContain('mp4');
+    expect(info.video.length).toBeGreaterThan(0);
+  });
+
+  it('detecta el hueco de Safari 17: OPFS presente, createWritable ausente', async () => {
+    const info = await collectDiagnostics(env({ userAgent: SAFARI_UA, storage: fakeOpfs(false) }));
+    expect(info.engine).toBe('safari');
+    expect(info.opfs).toBe(true);
+    expect(info.opfsWritable).toBe(false);
+  });
+
+  it('en Chromium OPFS es escribible y la sonda se limpia', async () => {
+    const removed: string[] = [];
+    const info = await collectDiagnostics(env({ userAgent: CHROME_UA, storage: fakeOpfs(true, removed) }));
+    expect(info.opfs).toBe(true);
+    expect(info.opfsWritable).toBe(true);
+    expect(removed).toEqual(['.concat-probe']);
+  });
+
+  it('estima el almacenamiento y tolera fallos de estimate/getDirectory', async () => {
+    const withEstimate = await collectDiagnostics(
+      env({ storage: { estimate: async () => ({ usage: 5 * 1024 * 1024, quota: 1024 * 1024 * 1024 }) } }),
+    );
+    expect(withEstimate.estimate).toEqual({ usage: 5 * 1024 * 1024, quota: 1024 * 1024 * 1024 });
+    const throwing = await collectDiagnostics(
+      env({
+        storage: {
+          estimate: async () => {
+            throw new Error('denied');
+          },
+          getDirectory: async () => {
+            throw new Error('blocked');
+          },
+        },
+      }),
+    );
+    expect(throwing.estimate).toBeNull();
+    expect(throwing.opfs).toBe(false);
+  });
+
+  it('renderDebugPanel pinta las filas y el botón de cerrar', () => {
+    const host = document.createElement('div');
+    const info: DebugInfo = {
+      userAgent: FIREFOX_UA,
+      engine: 'firefox',
+      videoDecoder: true,
+      videoEncoder: false,
+      containers: ['mp4', 'webm'],
+      video: ['h264'],
+      audio: ['aac'],
+      opfs: true,
+      opfsWritable: false,
+      indexedDb: true,
+      estimate: { usage: 1024, quota: 2048 },
+      serviceWorker: { supported: true, controlled: true, registrations: 1 },
+      cacheVersion: 'v7',
+      caches: ['concat-v7-x'],
+    };
+    const panel = renderDebugPanel(host, info);
+    expect(panel.classList.contains('debug-panel')).toBe(true);
+    const text = panel.textContent ?? '';
+    expect(text).toContain('Diagnóstico (cache v7)');
+    expect(text).toContain('firefox');
+    expect(text).toContain('escritura: no'); // the Safari 17 gap, visible
+    expect(text).toContain('concat-v7-x');
+    expect(panel.querySelector('dl')?.children.length).toBeGreaterThanOrEqual(20);
+    (panel.querySelector('.debug-panel-close') as HTMLButtonElement).click();
+    expect(host.querySelector('.debug-panel')).toBeNull();
+  });
+
+  it('mountDebugPanel solo monta con ?debug=1', async () => {
+    const host = document.createElement('div');
+    expect(await mountDebugPanel(host, '', env())).toBeNull();
+    expect(host.querySelector('.debug-panel')).toBeNull();
+    const panel = await mountDebugPanel(host, '?debug=1', env());
+    expect(panel).not.toBeNull();
+    expect(host.querySelector('.debug-panel')).toBe(panel);
+  });
+});
