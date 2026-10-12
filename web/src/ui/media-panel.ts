@@ -12,6 +12,7 @@
  */
 
 import { icon } from './components/icons.ts';
+import { writeMediaDrag } from './dnd/media-drag.ts';
 import type { MediaAsset } from '../media/media-pool.ts';
 import type { AppContext } from './app-context.ts';
 import { formatDuration } from '../player/timecode.ts';
@@ -202,7 +203,51 @@ export class MediaPanel {
       }
     });
     card.addEventListener('dblclick', () => this.ctx.addMediaToTimeline(asset.id));
+    this.makeDraggable(card, asset);
     return card;
+  }
+
+  /**
+   * Turns a card into a drag source for the timeline (Fase 8). The payload
+   * rides on the internal `application/x-concat-media*` types, so dropping it
+   * on the timeline inserts a clip while an OS file drop keeps importing.
+   * @param card the card element.
+   * @param asset the asset it shows.
+   */
+  private makeDraggable(card: HTMLElement, asset: MediaAsset): void {
+    card.setAttribute('draggable', 'true');
+    card.draggable = true;
+    card.addEventListener('dragstart', (event) => {
+      const transfer = (event as DragEvent).dataTransfer;
+      if (!transfer) return;
+      const written = writeMediaDrag(transfer, {
+        mediaId: asset.id,
+        kind: asset.type,
+        durationSeconds: asset.duration.asNumber(),
+        name: asset.name,
+      });
+      if (!written) return;
+      // Ghost image: a scaled copy of the card, never a browser default.
+      if (typeof transfer.setDragImage === 'function') {
+        const ghost = card.cloneNode(true) as HTMLElement;
+        ghost.style.position = 'absolute';
+        ghost.style.top = '-9999px';
+        ghost.style.left = '0';
+        ghost.style.opacity = '0.75';
+        ghost.style.transform = 'scale(0.8)';
+        ghost.style.pointerEvents = 'none';
+        document.body.appendChild(ghost);
+        transfer.setDragImage(ghost, 20, 20);
+        setTimeout(() => ghost.remove(), 0);
+      }
+      card.classList.add('media-card--dragging');
+      // The timeline listens on the document for the drag's end too.
+      document.dispatchEvent(new CustomEvent('media-drag-start', { detail: asset.id }));
+    });
+    card.addEventListener('dragend', () => {
+      card.classList.remove('media-card--dragging');
+      document.dispatchEvent(new CustomEvent('media-drag-end'));
+    });
   }
 
   /** Fase 4: proxy badge, progress and offline state. */

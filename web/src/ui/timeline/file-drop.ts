@@ -11,6 +11,8 @@
  * `installDropGuard` neutralizes every other corner of the window.
  */
 
+import { wasDropHandled } from '../dnd/drop-handled.ts';
+
 /** A drag event with the parts the capture uses. */
 export interface DragEventLike {
   dataTransfer?: { files?: ArrayLike<File>; types?: ArrayLike<string>; dropEffect?: string } | null;
@@ -79,6 +81,9 @@ export function installFileDrop(target: DropTargetLike, options: FileDropOptions
   };
   const onDrop = (event: DragEventLike): void => {
     if (!dragHasFiles(event)) return;
+    // A more specific zone (the timeline's media drop, an embedded widget)
+    // may have claimed this event already.
+    if (wasDropHandled(event)) return;
     event.preventDefault();
     event.stopPropagation();
     depth = 0;
@@ -128,6 +133,9 @@ export function installDropGuard(
 ): FileDropHandle {
   const block = (event: DragEventLike): void => {
     if (!dragHasFiles(event)) return;
+    // Handled elsewhere: never re-process (and never re-navigate) a drop the
+    // timeline already consumed.
+    if (wasDropHandled(event)) return;
     event.preventDefault();
   };
   target.addEventListener('dragover', block);

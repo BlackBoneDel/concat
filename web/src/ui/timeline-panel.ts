@@ -46,6 +46,7 @@ import {
 } from './interactions/keyboard-shortcuts.ts';
 import type { AppContext } from './app-context.ts';
 import { clampBezier } from '../editor/keyframe-operations.ts';
+import { installMediaDrop, type MediaDropHandle } from './timeline/media-drop.ts';
 import type { KeyframeRef } from './timeline/keyframe-track.ts';
 
 /** The Fase-3 timeline panel. */
@@ -69,6 +70,8 @@ export class TimelinePanel {
   private readonly overlayEl!: HTMLElement;
   private readonly contentWrap!: HTMLElement;
   private readonly abort = new AbortController();
+  /** Fase 8: the media-library drop target of this timeline. */
+  private mediaDrop: MediaDropHandle | null = null;
   private playheadFrame = 0;
   private readonly clipListEl!: HTMLElement;
 
@@ -173,6 +176,58 @@ export class TimelinePanel {
 
     this.shortcuts = installKeyboardShortcuts(this.shortcutActions());
 
+    // Fase 8: media cards dragged from the library land on the timeline.
+    this.mediaDrop = installMediaDrop({
+      target: this.root,
+      contentRect: () => this.view?.contentRect() ?? this.root.getBoundingClientRect(),
+      viewport: () => this.view?.viewport() ?? { pixelsPerSecond: 0, scrollTime: 0, scrollTop: 0, width: 0, height: 0 },
+      layouts: () => this.view?.trackLayouts() ?? [],
+      trackAtY: (y) => this.view?.trackIdAtY(y) ?? null,
+      snappingEnabled: () => session.snapping.enabled,
+      candidates: (exclude) =>
+        session.snapping.computeCandidates(
+          session.document,
+          exclude,
+          this.app.player.currentTime,
+          session.markers(),
+        ),
+      snap: (time, candidates) => session.snapping.snap(time, this.view?.zoom() ?? 80, candidates),
+      kindForMedia: (payload) => (payload.kind === 'audio' ? 'audio' : 'video'),
+      createTrack: (kind) => {
+        // Appended below the last lane: that is where the ghost is drawn.
+        const trackId = session.addTrack(kind, session.timeline.tracks.length);
+        this.onEdited();
+        console.info('[TimelineDrop] Pista nueva creada automáticamente:', trackId);
+        return trackId;
+      },
+      insert: (payload, trackId, atTime, mode) => {
+        const clipId = session.insertClipFromMedia(payload.mediaId, trackId, atTime, mode, {
+          durationSeconds: payload.durationSeconds,
+          kind: payload.kind,
+          name: payload.name,
+        });
+        console.info('[TimelineDrop] Clip insertado:', clipId, 'en pista:', trackId, 'tiempo:', atTime.asNumber());
+        this.onEdited();
+        document.dispatchEvent(new CustomEvent('timeline-changed'));
+      },
+      onPreview: (state) => this.view?.setDropPreview(state),
+      onGuide: (candidate) => {
+        if (candidate && this.view) {
+          this.snapGuides?.showDropGuide(candidate.time.asNumber(), (seconds) => this.view!.timeToX(seconds), candidate.label);
+        } else {
+          this.snapGuides?.clearDropGuide();
+        }
+      },
+      onDrop: ({ payload }) => {
+        this.app.notifications.success('Clip añadido al timeline', payload.name);
+        this.app.requestAutosave();
+      },
+      onError: (error) => {
+        console.error('[TimelineDrop] Error al insertar clip:', error);
+        this.app.notifications.error('No se pudo añadir el clip', error instanceof Error ? error.message : String(error));
+      },
+    });
+
     // Scrolling: headers follow vertically; content drives the view.
     const signal = this.abort.signal;
     this.scrollEl.addEventListener(
@@ -216,6 +271,8 @@ export class TimelinePanel {
   /** Tears the panel down. */
   dispose(): void {
     this.abort.abort();
+    this.mediaDrop?.dispose();
+    this.mediaDrop = null;
     this.drag?.dispose();
     this.drag = null;
     this.shortcuts?.dispose();

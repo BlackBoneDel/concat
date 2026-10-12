@@ -5,8 +5,13 @@
 
 import type { DocumentClip } from '../../model/document.ts';
 
-/** The seven timeline tools (V C B N Y U + Escape). */
-export type ToolId = 'select' | 'blade' | 'ripple' | 'roll' | 'slip' | 'slide' | 'pen';
+/** The timeline tools (V C B N Y U P + the H hand for panning). */
+export type ToolId = 'select' | 'blade' | 'ripple' | 'roll' | 'slip' | 'slide' | 'pen' | 'hand';
+
+/** Track heights in pixels (shared by the layout, the headers and the drop ghost). */
+export const TRACK_HEIGHT_COLLAPSED = 24;
+export const TRACK_HEIGHT_AUDIO = 72;
+export const TRACK_HEIGHT_VIDEO = 96;
 
 /** Anything the timeline can draw (never `ImageData`: it cannot scale). */
 export type DrawableImage = ImageBitmap | HTMLCanvasElement | HTMLImageElement;

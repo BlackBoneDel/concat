@@ -16,6 +16,43 @@ export {
   formatRulerTime,
 } from './ruler.ts';
 export { drawClips, roundedRect, type DrawClipsContext } from './clip-renderer.ts';
+// Fase 8: drag & drop from the media library + timeline coordinate maths.
+export {
+  DEFAULT_DRAG_DURATION,
+  MEDIA_DRAG_DURATION_MIME,
+  MEDIA_DRAG_MIME,
+  MEDIA_DRAG_MIMES,
+  MEDIA_DRAG_NAME_MIME,
+  MEDIA_DRAG_TYPE_MIME,
+  hasMediaDrag,
+  parseDragDuration,
+  readMediaDrag,
+  writeMediaDrag,
+  type DataTransferLike,
+  type MediaDragEventLike,
+  type MediaDragKind,
+  type MediaDragPayload,
+} from '../dnd/media-drag.ts';
+export { markDropHandled, wasDropHandled } from '../dnd/drop-handled.ts';
+export {
+  getTrackAtY,
+  layoutRects,
+  layoutToRect,
+  localPoint,
+  pixelsToTime,
+  timeToPixels,
+  type TrackRect,
+} from './coord-utils.ts';
+export {
+  DROP_BORDER,
+  DROP_FILL,
+  drawDropPreview,
+  dropPreviewRect,
+  laneHeight,
+  type DropPreviewRect,
+  type DropPreviewState,
+} from './drop-preview.ts';
+export { installMediaDrop, type DropMode, type MediaDropHandle, type MediaDropOptions } from './media-drop.ts';
 export { drawTransitions, type DrawTransitionsContext } from './transitions-renderer.ts';
 export { WaveformRenderer } from './waveform-renderer.ts';
 export { ThumbnailRenderer } from './thumbnail-renderer.ts';

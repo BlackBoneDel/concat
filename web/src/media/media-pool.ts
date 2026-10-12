@@ -321,6 +321,15 @@ export class MediaPool implements FramePool {
   }
 
   /**
+   * One loaded asset by id — the name the drag & drop wiring uses.
+   * @param id the asset id.
+   * @returns the asset, or `undefined` when the library never saw it.
+   */
+  getAsset(id: string): MediaAsset | undefined {
+    return this.assets.get(id);
+  }
+
+  /**
    * Warms the frame cache ahead of `time` for every clip about to play.
    * @param requests the (media id, source time) pairs coming up.
    */

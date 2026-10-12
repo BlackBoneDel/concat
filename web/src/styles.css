@@ -1167,6 +1167,26 @@ body {
   background: var(--error);
 }
 
+/* Fase 8: the magenta guide a media drop leaves at its snapped instant. */
+.tl-snap-guide-drop {
+  background: #ff00ff;
+  width: 2px;
+  box-shadow: 0 0 6px rgba(255, 0, 255, 0.6);
+}
+
+/* Fase 8: the timeline accepts cards dragged from the media library. */
+.timeline-panel.timeline-drop-active,
+.tl-main.timeline-drop-active {
+  outline: 1px dashed #4caf50;
+  outline-offset: -4px;
+}
+
+/* Fase 8: the source card while it is being dragged. */
+.media-card--dragging {
+  opacity: 0.45;
+  cursor: grabbing;
+}
+
 .tl-snap-guide-marker {
   background: var(--accent-primary);
 }

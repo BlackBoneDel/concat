@@ -23,11 +23,15 @@ import {
   type LaneHit,
 } from './keyframe-track.ts';
 import type { KeyProperty } from '../../model/wire.ts';
+import { drawDropPreview, dropPreviewRect, type DropPreviewState } from './drop-preview.ts';
 import { drawMarkers, drawRuler, markerAtPosition, RULER_HEIGHT } from './ruler.ts';
 import { ThumbnailRenderer } from './thumbnail-renderer.ts';
 import { drawTransitions } from './transitions-renderer.ts';
 import {
   readThemeColors,
+  TRACK_HEIGHT_AUDIO,
+  TRACK_HEIGHT_COLLAPSED,
+  TRACK_HEIGHT_VIDEO,
   type ClipDragPreview,
   type ClipPreviewer,
   type ThemeColors,
@@ -40,10 +44,10 @@ import { WaveformRenderer } from './waveform-renderer.ts';
 export const MIN_PIXELS_PER_SECOND = 10;
 export const MAX_PIXELS_PER_SECOND = 500;
 
-/** Track heights in pixels. */
-const HEIGHT_COLLAPSED = 24;
-const HEIGHT_AUDIO = 72;
-const HEIGHT_VIDEO = 96;
+/** Track heights in pixels (the drop ghost reads the same numbers). */
+const HEIGHT_COLLAPSED = TRACK_HEIGHT_COLLAPSED;
+const HEIGHT_AUDIO = TRACK_HEIGHT_AUDIO;
+const HEIGHT_VIDEO = TRACK_HEIGHT_VIDEO;
 
 /** How much empty space is kept after the last clip (seconds). */
 const TAIL_SECONDS = 20;
@@ -97,6 +101,8 @@ export class TimelineView {
   private readonly waveform: WaveformRenderer;
   private readonly thumbnails: ThumbnailRenderer;
   private dragPreviewState: ClipDragPreview | null = null;
+  /** The ghost of a media card hovering the timeline (drop preview). */
+  private dropPreviewState: DropPreviewState | null = null;
   /** Fase 5: clips whose keyframe lane is open (⏷). */
   private readonly expandedClips = new Set<string>();
   /** Fase 5: the property each open lane shows. */
@@ -134,6 +140,7 @@ export class TimelineView {
   /** Detaches listeners and observers. */
   dispose(): void {
     this.disposed = true;
+    this.dropPreviewState = null;
     this.unsubscribeKeyframes();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
@@ -403,6 +410,11 @@ export class TimelineView {
       viewport,
       colors,
     });
+    // The media card hovering the timeline: where the clip would land.
+    if (this.dropPreviewState) {
+      const rect = dropPreviewRect(this.dropPreviewState, this.layouts, viewport);
+      if (rect) drawDropPreview(contentCtx, rect);
+    }
     this.updatePlayhead();
   }
 
@@ -451,6 +463,28 @@ export class TimelineView {
     return this.dragPreviewState;
   }
 
+  /**
+   * Sets the drop ghost of a media card being dragged over the timeline
+   * (visual only; `null` clears it).
+   * @param preview the drag state, or `null`.
+   */
+  setDropPreview(preview: DropPreviewState | null): void {
+    const changed =
+      (this.dropPreviewState === null) !== (preview === null) ||
+      (preview !== null &&
+        this.dropPreviewState !== null &&
+        (this.dropPreviewState.trackId !== preview.trackId ||
+          this.dropPreviewState.atTime.compare(preview.atTime) !== 0 ||
+          this.dropPreviewState.pointerY !== preview.pointerY));
+    this.dropPreviewState = preview;
+    if (changed) this.requestRender();
+  }
+
+  /** The live drop ghost, if any. */
+  dropPreview(): DropPreviewState | null {
+    return this.dropPreviewState;
+  }
+
   // -- Fase 5: keyframe lanes ------------------------------------------------
 
   /** Whether a clip's keyframe lane is open. */
@@ -496,6 +530,11 @@ export class TimelineView {
   setKeyframePreview(preview: KeyframeGesturePreview | null): void {
     this.keyframePreviewState = preview;
     this.requestRender();
+  }
+
+  /** A hit-test alias of {@link trackAtY} for the drop wiring. */
+  trackIdAtY(y: number): string | null {
+    return this.trackAtY(y)?.trackId ?? null;
   }
 
   /**
