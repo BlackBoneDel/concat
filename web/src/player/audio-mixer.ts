@@ -220,6 +220,15 @@ export class AudioMixer {
     if (this.started) this.startSource(this.sources.get(key)!, this.context.currentTime, 0);
   }
 
+  /**
+   * Makes sure a lane exists on the mix, so a mute or solo set before its
+   * first clip is scheduled still applies (idempotent).
+   * @param trackId the lane.
+   */
+  ensureTrack(trackId: string): void {
+    if (!this.tracks.has(trackId)) this.createTrack(trackId);
+  }
+
   /** Removes every source of a track. */
   removeTrack(trackId: string): void {
     for (const [key, source] of [...this.sources]) {
@@ -265,6 +274,20 @@ export class AudioMixer {
     if (!track) return;
     track.solo = solo;
     this.refreshTrackGains();
+  }
+
+  /**
+   * Resumes the context. Browsers start an `AudioContext` suspended until a
+   * user gesture, so the player calls this synchronously from play(); a
+   * rejected resume is logged, never thrown into the render loop.
+   */
+  resume(): void {
+    const pending = this.context.resume?.();
+    if (!pending) return;
+    pending.then(
+      () => console.info('[AudioMixer] resumed'),
+      (error: unknown) => console.warn('[AudioMixer] resume failed', error),
+    );
   }
 
   /**

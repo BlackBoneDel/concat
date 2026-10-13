@@ -439,11 +439,9 @@ export class TimelinePanel {
   private onEdited(): void {
     // Fase 7 hook (QA): an undo/redo/edit while dragging cancels the drag.
     this.drag?.syncWithHistory();
-    this.view?.relayout();
-    this.view?.requestRender();
-    this.syncSize();
-    this.buildHeaders();
-    this.minimap?.render();
+    // Full refresh: the clip list (the accessible mirror of the lanes) and the
+    // toolbar's undo/redo state were not rebuilt after keyboard or toolbar edits.
+    this.refreshAll();
     this.app.requestRender();
     this.app.requestAutosave();
   }
@@ -658,15 +656,18 @@ export class TimelinePanel {
         this.refreshAll();
       },
       splitAtPlayhead: () => {
-        const time = this.app.player.currentTime.asNumber();
-        const timeline = this.session ? currentTimeline(this.session.document) : null;
-        if (!this.session || !timeline) return;
-        const ops: EditOperation[] = [];
-        for (const clip of timeline.clips) {
-          const tail = this.session.splitClip(clip.id, time);
-          void tail;
+        const session = this.session;
+        if (!session) return;
+        // Selected clips under the playhead; with no selection, every clip under it.
+        const cut = session.splitClipsAt(
+          this.app.player.currentTime.asNumber(),
+          [...session.selection.selectedClipIds],
+        );
+        if (cut === 0) {
+          this.app.notifications.warning('No se puede dividir aquí', 'Coloca el playhead dentro de un clip, lejos de sus bordes.');
+          return;
         }
-        void ops;
+        this.app.notifications.info('Clip dividido', cut === 1 ? '1 clip cortado en el playhead.' : `${cut} clips cortados en el playhead.`);
         this.onEdited();
       },
       deleteSelection: () => {

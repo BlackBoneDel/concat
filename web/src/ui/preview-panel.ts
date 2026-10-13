@@ -146,6 +146,7 @@ export class PreviewPanel {
     this.volume.addEventListener('input', () => {
       this.ctx.settings.volume = Number(this.volume.value);
       this.ctx.saveSettings();
+      this.applyVolume();
       this.syncVolumeIcon();
     });
     right.appendChild(this.volume);
@@ -185,6 +186,7 @@ export class PreviewPanel {
       this.playButton.setAttribute('aria-label', playing ? 'Pausar' : 'Reproducir');
     };
     this.quality.setAttribute('aria-label', 'Calidad de previsualización');
+    this.applyVolume();
     this.syncVolumeIcon();
     this.sizeCanvas();
     if (typeof ResizeObserver !== 'undefined') {
@@ -269,7 +271,13 @@ export class PreviewPanel {
     }
     this.ctx.settings.volume = Number(this.volume.value);
     this.ctx.saveSettings();
+    this.applyVolume();
     this.syncVolumeIcon();
+  }
+
+  /** Pushes the slider level into the audio mix (it was only cosmetic before). */
+  private applyVolume(): void {
+    this.ctx.player.setOutputVolume(Number(this.volume.value));
   }
 
   private syncVolumeIcon(): void {

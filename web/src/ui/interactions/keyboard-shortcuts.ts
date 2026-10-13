@@ -81,6 +81,8 @@ export function installKeyboardShortcuts(
 ): { dispose(): void } {
   const onKeyDown = (event: KeyboardEvent): void => {
     if (isTypingTarget(event.target)) return;
+    // Dialogs own the keyboard while they are open.
+    if (typeof document !== 'undefined' && document.querySelector('.modal-backdrop') !== null) return;
     const ctrl = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
     if (ctrl) {
@@ -142,8 +144,8 @@ export function installKeyboardShortcuts(
           actions.zoomFit();
           return;
         case 's':
+          // Ctrl+S is the app-level 'save' action: handled there, once.
           event.preventDefault();
-          actions.saveProject();
           return;
         default:
           return;

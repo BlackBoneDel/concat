@@ -51,6 +51,15 @@ export class FakePlayer {
     return this.playing;
   }
 
+  /** The transport slider's level reaches the player (see PreviewPanel.applyVolume). */
+  readonly volumeCalls: number[] = [];
+
+  setOutputVolume(volume: number): void {
+    this.volumeCalls.push(volume);
+  }
+
+  syncTrackStates(): void {}
+
   get duration(): Rational {
     return Rational.approximate(this.durationSeconds) ?? Rational.ZERO;
   }
