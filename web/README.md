@@ -762,3 +762,17 @@ Faithfulness details worth knowing:
 ## License
 
 AGPL-3.0-or-later, same as Concat. SPDX headers are carried on every file.
+
+## Troubleshooting playback
+
+Playback and timeline behaviour, and the reasons behind each path, are in
+[`docs/playback-and-tools.md`](docs/playback-and-tools.md). Quick checks:
+
+- **No sound after Play**: the browser suspended the audio context. Press Play
+  from a click; the editor resumes it inside that click.
+- **Space does nothing**: focus is in the timecode field, or a dialog is open.
+  Click the preview or the timeline first.
+- **Video is black or frozen**: open the console. A `DataError` from
+  `VideoDecoder` points at the decoder path described in the doc.
+- **Ctrl+K cuts nothing**: the playhead is on a clip edge (within one frame), or
+  no clip is under it.

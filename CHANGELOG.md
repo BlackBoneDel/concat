@@ -18,6 +18,19 @@ releases page only: https://github.com/jub0t/Concat/releases
   unlocked install.
 - The service worker moves to cache `v10`. A visitor who has the previous
   version gets the update banner, and on reload only the new caches remain.
+- Playback works in the web editor. Space and the Play button start and stop
+  the preview once per press (they used to toggle twice and do nothing).
+  Sound starts from the same click, and the preview volume and mute work.
+- MP4 video plays smoothly. Frames are decoded forward instead of from the
+  last keyframe each time, and the preview no longer flashes black between
+  frames.
+- Ctrl+K and the toolbar split cut the clip under the playhead and nothing
+  else. One Ctrl+Z restores it; a cut next to a clip edge is refused with a
+  message.
+- Mute and solo on a track silence it in the preview and in playback, at once.
+- Keyboard shortcuts for the timeline (Space, Ctrl+K, Ctrl+Z, Delete, arrows,
+  zoom) fire once per press. They are ignored while a dialog is open.
+- The clip list and the undo and redo buttons update after every edit.
 
 ## 0.2.6 — 2026-10-04
 
