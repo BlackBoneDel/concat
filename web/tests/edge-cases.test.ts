@@ -312,7 +312,7 @@ function env(overrides: Partial<DebugEnvironment> = {}): DebugEnvironment {
     storage: null,
     indexedDb: true,
     serviceWorker: null,
-    cacheKeys: async () => ['concat-v7-abc', 'concat-runtime-v7-abc'],
+    cacheKeys: async () => ['concat-web-v8-abc', 'concat-runtime-v8-abc'],
     webcodecs: { videoDecoder: true, videoEncoder: false },
     ...overrides,
   };
@@ -335,14 +335,14 @@ describe('panel de diagnóstico ?debug=1', () => {
     expect(detectEngineName('some-crawler/1.0')).toBe('chromium');
   });
 
-  it('collectDiagnostics informa motor, WebCodecs, caches y versión v7', async () => {
+  it('collectDiagnostics informa motor, WebCodecs, caches y versión v8', async () => {
     const info = await collectDiagnostics(env());
     expect(info.engine).toBe('firefox');
     expect(info.videoDecoder).toBe(true);
     expect(info.videoEncoder).toBe(false);
     expect(info.indexedDb).toBe(true);
-    expect(info.cacheVersion).toBe('v7');
-    expect(info.caches).toEqual(['concat-v7-abc', 'concat-runtime-v7-abc']);
+    expect(info.cacheVersion).toBe('v8');
+    expect(info.caches).toEqual(['concat-web-v8-abc', 'concat-runtime-v8-abc']);
     // jsdom-style probe ('' to everything) → the documented baseline matrix.
     expect(info.containers).toContain('mp4');
     expect(info.video.length).toBeGreaterThan(0);
@@ -399,16 +399,16 @@ describe('panel de diagnóstico ?debug=1', () => {
       indexedDb: true,
       estimate: { usage: 1024, quota: 2048 },
       serviceWorker: { supported: true, controlled: true, registrations: 1 },
-      cacheVersion: 'v7',
-      caches: ['concat-v7-x'],
+      cacheVersion: 'v8',
+      caches: ['concat-web-v8-x'],
     };
     const panel = renderDebugPanel(host, info);
     expect(panel.classList.contains('debug-panel')).toBe(true);
     const text = panel.textContent ?? '';
-    expect(text).toContain('Diagnóstico (cache v7)');
+    expect(text).toContain('Diagnóstico (cache v8)');
     expect(text).toContain('firefox');
     expect(text).toContain('escritura: no'); // the Safari 17 gap, visible
-    expect(text).toContain('concat-v7-x');
+    expect(text).toContain('concat-web-v8-x');
     expect(panel.querySelector('dl')?.children.length).toBeGreaterThanOrEqual(20);
     (panel.querySelector('.debug-panel-close') as HTMLButtonElement).click();
     expect(host.querySelector('.debug-panel')).toBeNull();

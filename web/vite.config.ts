@@ -112,6 +112,8 @@ export default defineConfig({
   },
   build: {
     outDir: 'dist',
+    assetsDir: 'assets',
+    modulePreload: { polyfill: true },
     sourcemap: true,
     target: 'es2022',
   },

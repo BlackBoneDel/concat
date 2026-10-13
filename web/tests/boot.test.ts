@@ -9,7 +9,7 @@
  * the player seeks and plays, Ctrl+S saves and the project reopens.
  */
 
-import { beforeAll, describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it, vi } from 'vitest';
 import { Rational } from '../src/core/rational.ts';
 
 // -- a tiny valid H.264 MP4 (same shape as the demuxer tests) --------------
@@ -82,6 +82,11 @@ describe('editor boot and demo checklist', () => {
   let app: import('../src/main.ts').EditorApp | null = null;
 
   beforeAll(async () => {
+    // jsdom has no bitmap API; background thumbnail generation still needs
+    // a closable placeholder when the synthetic MP4 cannot be decoded.
+    vi.stubGlobal('createImageBitmap', async (source: { width: number; height: number }) => ({
+      width: source.width, height: source.height, close() {},
+    }));
     document.body.innerHTML = '<div id="app"></div>';
     const main = await import('../src/main.ts');
     app = main.app;

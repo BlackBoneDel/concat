@@ -22,8 +22,8 @@ const SHELL = ['./', './index.html', './offline.html', './manifest.json', './ico
  * stale GitHub Pages shells of earlier fases get evicted. Keep in sync
  * with SW_CACHE_VERSION in src/pwa/sw-register.ts.
  */
-const CACHE_VERSION = 'v7';
-const CACHE = `concat-${CACHE_VERSION}-${BUILD_ID}`;
+const CACHE_VERSION = 'v8';
+const CACHE = `concat-web-${CACHE_VERSION}-${BUILD_ID}`;
 const RUNTIME = `concat-runtime-${CACHE_VERSION}-${BUILD_ID}`;
 
 self.addEventListener('install', (event) => {
@@ -55,6 +55,7 @@ self.addEventListener('message', (event) => {
 async function networkFirst(request) {
   try {
     const response = await fetch(request);
+    // HTTP errors are returned unchanged and must never enter the cache.
     if (response.ok && response.status === 200 && response.type === 'basic') {
       const copy = response.clone();
       void caches.open(RUNTIME).then((cache) => cache.put(request, copy)).catch(() => undefined);
@@ -74,6 +75,10 @@ self.addEventListener('fetch', (event) => {
   const request = event.request;
   if (request.method !== 'GET' || request.headers.has('range')) return;
   const url = new URL(request.url);
+  // blob: can share our origin; never pass local schemes to fetch/cache.
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
   if (url.origin !== self.location.origin) return;
+  // Only cache this app, not other projects hosted on the same domain.
+  if (!url.href.startsWith(self.registration.scope)) return;
   event.respondWith(networkFirst(request));
 });

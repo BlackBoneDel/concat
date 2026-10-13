@@ -10,11 +10,11 @@
 
 /**
  * Fase 7+: the cache-schema version stamped into every cache name in
- * `public/sw.js` (`concat-v7-<build>`). Bumping it evicts all stale caches
+ * `public/sw.js` (`concat-web-v8-<build>`). Bumping it evicts all stale caches
  * of previous deploys on the next activate; the `?debug=1` panel checks the
  * live cache keys against it. Keep in sync with `CACHE_VERSION` in sw.js.
  */
-export const SW_CACHE_VERSION = 'v7';
+export const SW_CACHE_VERSION = 'v8';
 
 /** The parts of `ServiceWorker` the registrar uses. */
 export interface WorkerLike {
@@ -51,7 +51,7 @@ export interface RegisterOptions {
   container?: ContainerLike | null;
   /** Defaults to `location.reload()`. */
   reload?(): void;
-  /** Script URL, relative to the page (default `./sw.js`). */
+  /** Script URL, relative to the page (default `${BASE_URL}sw.js`). */
   url?: string;
   /** Milliseconds between update checks (default 1 h; 0 disables). */
   checkInterval?: number;
@@ -83,7 +83,10 @@ export async function registerServiceWorker(options: RegisterOptions = {}): Prom
 
   let registration: RegistrationLike;
   try {
-    registration = await container.register(options.url ?? './sw.js', { scope: './' });
+    const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+      ? import.meta.env.BASE_URL
+      : `${import.meta.env.BASE_URL}/`;
+    registration = await container.register(options.url ?? `${baseUrl}sw.js`, { scope: baseUrl });
   } catch (error) {
     options.onError?.(error);
     return none;

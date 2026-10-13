@@ -111,7 +111,7 @@ const MIME: Record<TranscodeOptions['format'], string> = {
 };
 
 /**
- * The vendored core URLs, resolved against the document (or worker) base so
+ * The vendored core URLs, resolved with Vite BASE_URL against the document so
  * the app works under any sub-path (`base: './'`).
  * @returns absolute URLs of the core script and wasm.
  */
@@ -122,9 +122,15 @@ export function vendoredCoreUrls(): { coreURL: string; wasmURL: string } {
       : typeof location !== 'undefined'
         ? location.href
         : 'http://localhost/';
+  const baseUrl = import.meta.env.BASE_URL.endsWith('/')
+    ? import.meta.env.BASE_URL
+    : `${import.meta.env.BASE_URL}/`;
+  // BASE_URL can be './': resolving it against the origin would discard
+  // the GitHub Pages subpath. Absolute bases such as '/concat/' work too.
+  const appBase = new URL(baseUrl, base);
   return {
-    coreURL: new URL('vendor/ffmpeg/ffmpeg-core.js', base).href,
-    wasmURL: new URL('vendor/ffmpeg/ffmpeg-core.wasm', base).href,
+    coreURL: new URL('vendor/ffmpeg/ffmpeg-core.js', appBase).href,
+    wasmURL: new URL('vendor/ffmpeg/ffmpeg-core.wasm', appBase).href,
   };
 }
 
