@@ -18,6 +18,7 @@ import { TimelinePanel } from '../src/ui/timeline-panel.ts';
 import { MEDIA_DRAG_MIME, MEDIA_DRAG_TYPE_MIME } from '../src/ui/dnd/media-drag.ts';
 import { markDropHandled, wasDropHandled } from '../src/ui/dnd/drop-handled.ts';
 import { installDropGuard, installFileDrop } from '../src/ui/timeline/file-drop.ts';
+import { trackKindOf } from '../src/editor/operations.ts';
 import {
   createFakeApp,
   dragEvent,
@@ -230,19 +231,27 @@ describe('Fase 8 · media card → timeline (drag & drop)', () => {
     expect(fake.session.document.timelines[0]!.clips).toHaveLength(0);
   });
 
-  it('un clip que la pista rechaza informa del error (sin romper)', () => {
+  it('un clip que cae sobre una pista del otro tipo busca (o crea) la suya en vez de fallar', () => {
     // An explicit audio lane appended below the four video lanes.
     const from = fake.session.timeline.tracks.length;
     const audioTrackId = fake.session.addTrack('audio', from)!;
     const { timelineRoot } = mount(fake);
+    // A *video* card dropped over that audio lane: the old behaviour was an
+    // error toast and no clip ("no se pudo insertar el clip en la pista"),
+    // which is what made an audio card dropped over a video lane fail on
+    // GitHub Pages. The drop now lands on a lane that accepts the clip.
     const transfer = mediaTransfer('m-8', 4, 'video');
     // y = 400 sits inside the appended lane (4 × 96 = 384 … 456).
     timelineRoot.dispatchEvent(dragEvent('dragover', { dataTransfer: transfer, clientX: 320, clientY: 700 }));
     timelineRoot.dispatchEvent(dragEvent('drop', { dataTransfer: transfer, clientX: 320, clientY: 700 }));
 
     expect(laneClips(fake.session, audioTrackId)).toHaveLength(0);
-    // The drop reports the failure instead of throwing out of the event.
-    expect(toastTitles(fake.toasts)).toContain('No se pudo añadir el clip');
+    const videoLane = fake.session.timeline.tracks.find(
+      (track) => trackKindOf(fake.session.document, track) !== 'audio' && laneClips(fake.session, track.id).length > 0,
+    );
+    expect(videoLane).toBeDefined();
+    expect(toastTitles(fake.toasts)).not.toContain('No se pudo añadir el clip');
+    expect(toastTitles(fake.toasts)).toContain('Clip añadido al timeline');
   });
 
   it('el drop de medios y el guard global de archivos no se pisan', () => {
