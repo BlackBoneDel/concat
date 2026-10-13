@@ -142,7 +142,7 @@ describe('service worker: registro y reglas de caché', () => {
   it('la versión de caché del registro coincide con la del sw.js', () => {
     const register = read('src/pwa/sw-register.ts');
     const declared = register.match(/export const SW_CACHE_VERSION = '([^']+)'/)?.[1];
-    expect(declared).toBe('v9');
+    expect(declared).toBe('v10');
     const sw = read('public/sw.js');
     expect(sw).toMatch(new RegExp(`const CACHE_VERSION = '${declared}'`));
     expect(sw).toContain('concat-web-${CACHE_VERSION}-${BUILD_ID}');

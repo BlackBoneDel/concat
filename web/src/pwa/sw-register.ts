@@ -10,11 +10,11 @@
 
 /**
  * Fase 7+: the cache-schema version stamped into every cache name in
- * `public/sw.js` (`concat-web-v9-<build>`). Bumping it evicts all stale caches
+ * `public/sw.js` (`concat-web-v10-<build>`). Bumping it evicts all stale caches
  * of previous deploys on the next activate; the `?debug=1` panel checks the
  * live cache keys against it. Keep in sync with `CACHE_VERSION` in sw.js.
  */
-export const SW_CACHE_VERSION = 'v9';
+export const SW_CACHE_VERSION = 'v10';
 
 /** The parts of `ServiceWorker` the registrar uses. */
 export interface WorkerLike {
