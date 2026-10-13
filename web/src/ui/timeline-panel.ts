@@ -439,11 +439,9 @@ export class TimelinePanel {
   private onEdited(): void {
     // Fase 7 hook (QA): an undo/redo/edit while dragging cancels the drag.
     this.drag?.syncWithHistory();
-    this.view?.relayout();
-    this.view?.requestRender();
-    this.syncSize();
-    this.buildHeaders();
-    this.minimap?.render();
+    // Full refresh: the clip list (the accessible mirror of the lanes) and the
+    // toolbar's undo/redo state were not rebuilt after keyboard or toolbar edits.
+    this.refreshAll();
     this.app.requestRender();
     this.app.requestAutosave();
   }
