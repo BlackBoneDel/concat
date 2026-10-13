@@ -57,6 +57,84 @@ no uploads, no telemetry: the edit never leaves the user's browser.
    real-time canvas preview, all colors from theme variables, full keyboard
    shortcuts that never fire while typing.
 
+## Production import/timeline fixes
+
+The deployed editor (**<https://blackbonedel.github.io/concat/>**) failed at the
+one gesture everything else depends on: bringing footage in. These are the
+fixes, what they changed, and how to verify them without trusting the unit
+suite.
+
+**What was broken**
+
+- Dropping a file anywhere except the timeline or the library grid did
+  *nothing* (the old app-wide guard only blocked navigation). Letting go just
+  outside a panel could still open the raw file and lose the session.
+- The **Importar** button created a detached `<input type="file">` kept alive
+  only by the closure of the click handler: a GC between the click and the
+  selection, or Safari/iOS (which refuses to open a picker for an input outside
+  the document), made the button look dead. Picking the same file twice never
+  fired `change` at all.
+- The library card appeared only after the whole probe finished — or never,
+  when the metadata probe hung. An empty file or a `.exe` produced a phantom
+  asset (`0.0s · 0×0`) with a success toast, and a `currentTime = NaN` threw
+  inside the thumbnail path.
+- During playback the playhead *line* advanced while the timeline's own
+  playhead stayed frozen: two elements, only one of them updated per frame.
+
+**The fixes** (`src/ui/global-drop.ts`, `src/ui/global-file-input.ts`,
+`src/media/media-pool.ts`, `src/media/decoder.ts`, `src/media/thumbnail.ts`,
+`src/ui/timeline-panel.ts`, `src/ui/timeline/media-drop.ts`)
+
+- `installGlobalDrop` captures `dragenter`/`dragover`/`dragleave`/`drop` on
+  **both** `window` and `document`, calls `preventDefault()` +
+  `stopPropagation()`, sets `dropEffect = 'copy'`, shows the *«Suelta los
+  archivos para importar…»* overlay and imports. `markDropHandled` guarantees
+  one drop is processed once; the internal `application/x-concat-media` drag
+  never triggers a re-import.
+- One permanent `#concat-global-file-input` (`multiple`, media + subtitle + LUT
+  `accept`) in `document.body` is the single door for the panel button,
+  *Archivo → Importar medios*, `Ctrl+I` and the subtitle pickers; `input.value`
+  is cleared after every `change`.
+- `MediaPool.addMedia` validates size and container **before** touching the
+  pool, registers the asset synchronously as `status: 'processing'` with a
+  160×90 SVG placeholder, emits `onMediaAdded` (the card is on screen in a few
+  milliseconds) and finishes OPFS → IndexedDB → memory plus the 2000 ms probe
+  in the background, emitting `onMediaUpdated`. Empty files and unsupported
+  bytes are refused with a toast and no asset.
+- The decoder never assigns a non-finite `currentTime`, releases
+  `src`/`load()`/`revokeObjectURL`/`VideoFrame`/`AudioContext` in `finally`,
+  chains WebCodecs → media element → FFmpeg → minimal metadata, and reads
+  files over 768 MB in 64 MiB slices.
+- A media card dropped on a lane of the other kind lands on the first lane of
+  its own kind (or a new one) instead of failing with an `EditError`, and the
+  timeline playhead advances with playback.
+- The service worker bypasses `blob:`/`data:`/`file:`/`chrome-extension:`,
+  never caches 404/500 or `range` requests, registers as `${BASE_URL}sw.js`
+  with the `/concat/` scope, and the cache schema is now `v9`.
+- `ci.yml` no longer runs for `web/**`-only changes, the Windows desktop entry
+  is `continue-on-error` (documented desktop debt) and every job has a hard
+  `timeout-minutes`; `deploy-gh-pages.yml` runs `npm test` and
+  `npm run typecheck` before publishing, so it is the source of truth for the
+  web editor.
+
+**Verifying it**
+
+```bash
+cd web
+npm test            # 100+ files, incl. the regression suites below
+npm run typecheck   # tsc --noEmit, 0 errors
+npm run build       # emits dist/ with relative asset URLs
+
+# The real check: the built app served the way GitHub Pages serves it, under
+# /concat/, driven in Chromium (dispatches a synthetic WebM/MP4/WAV, drops
+# them on the library, the timeline and the background, presses play).
+CONCAT_CHROMIUM=/path/to/chrome node scripts/verify-production.mjs
+```
+
+Regression coverage: `tests/import-production-bulletproof.test.ts`,
+`tests/global-drop-and-file-input.test.ts`, `tests/timeline-dnd-media.test.ts`,
+`tests/production-subpath-assets.test.ts` and `tests/ci-workflow-guards.test.ts`.
+
 ## Fase 8 — arrastrar y soltar de verdad, tiras de miniaturas y HUD estilo CapCut
 
 ### El fallo crítico: una tarjeta de la biblioteca no llegaba a la timeline
