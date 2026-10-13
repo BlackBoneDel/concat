@@ -16,6 +16,7 @@ import { Rational } from '../core/rational.ts';
 import { renderFrame, type RenderTarget } from '../render/index.ts';
 import { MISSING_MEDIA_COLORS } from '../render/compositor.ts';
 import type { EditorSession } from '../session/editor-session.ts';
+import { currentTimeline } from '../editor/operations.ts';
 import type { MediaPool } from '../media/media-pool.ts';
 import { AudioMixer, type AudioGraphContext, type BufferLike } from './audio-mixer.ts';
 
@@ -99,6 +100,8 @@ export class PreviewPlayer {
   private pendingRenders = 0;
   /** Fase 7: media ids already reported as failing. */
   private readonly failedMedia = new Set<string>();
+  /** Last mute/solo applied per lane, so syncs only touch changed lanes. */
+  private readonly trackFlags = new Map<string, string>();
 
   /**
    * @param options the surfaces and data to play.
@@ -156,6 +159,29 @@ export class PreviewPlayer {
    */
   setOutputVolume(volume: number): void {
     this.mixer?.setMasterVolume(Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0);
+  }
+
+  /**
+   * Mirrors the document's lane flags onto the mix: `muted` and the `solo`
+   * extra. Cheap and idempotent — the app calls it after every edit, so a
+   * mute or solo toggled during playback silences its lane at once, without a
+   * seek or a rebuild of the schedule. Before this existed nothing in the app
+   * called `AudioMixer.setTrackMute`, so the lane flags never reached the audio.
+   */
+  syncTrackStates(): void {
+    const mixer = this.mixer;
+    if (!mixer) return;
+    for (const track of currentTimeline(this.session.document).tracks) {
+      const muted = track.muted;
+      const solo = track.extra['solo'] === true;
+      mixer.ensureTrack(track.id);
+      const key = `${muted}/${solo}`;
+      if (this.trackFlags.get(track.id) === key) continue;
+      this.trackFlags.set(track.id, key);
+      mixer.setTrackMute(track.id, muted);
+      mixer.setTrackSolo(track.id, solo);
+      console.info(`[AudioMixer] track trackId=${track.id} muted=${muted} solo=${solo}`);
+    }
   }
 
   /** Starts (or resumes) playback. */
@@ -396,6 +422,7 @@ export class PreviewPlayer {
         rate: clip.speed.asNumber() * this.rate,
       });
     }
+    this.syncTrackStates();
   }
 
   /** Picture/sound drift check; re-syncs when they separate. */

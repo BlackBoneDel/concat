@@ -567,6 +567,8 @@ class EditorApp implements AppContext {
   }
 
   requestRender(): void {
+    // Every edit passes here: lane mute/solo reach the mix immediately.
+    this.player.syncTrackStates();
     if (this.renderTimer !== null) clearTimeout(this.renderTimer);
     this.renderTimer = setTimeout(() => {
       this.renderTimer = null;

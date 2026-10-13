@@ -220,6 +220,15 @@ export class AudioMixer {
     if (this.started) this.startSource(this.sources.get(key)!, this.context.currentTime, 0);
   }
 
+  /**
+   * Makes sure a lane exists on the mix, so a mute or solo set before its
+   * first clip is scheduled still applies (idempotent).
+   * @param trackId the lane.
+   */
+  ensureTrack(trackId: string): void {
+    if (!this.tracks.has(trackId)) this.createTrack(trackId);
+  }
+
   /** Removes every source of a track. */
   removeTrack(trackId: string): void {
     for (const [key, source] of [...this.sources]) {
