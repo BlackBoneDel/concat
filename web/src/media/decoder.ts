@@ -67,6 +67,71 @@ export interface MediaInfo {
 /** How many frames the cache holds before the oldest are closed. */
 const FRAME_CACHE_LIMIT = 30;
 
+/**
+ * The hard budget of every metadata step (element probe, duration reveal,
+ * FFmpeg probe). Past this the file is declared "metadata unknown" and the
+ * import continues with the fallbacks — the library card never spins forever.
+ */
+export const METADATA_TIMEOUT_MS = 2000;
+
+/**
+ * Above this size the file is read in slices instead of one `arrayBuffer()`:
+ * engines cap a single allocation, and a 1 GB import must not die as an
+ * out-of-memory abort when the bytes can be read perfectly well in pieces.
+ */
+export const LARGE_FILE_BYTES = 768 * 1024 * 1024;
+
+/** Slice size of the chunked read (64 MiB). */
+const READ_CHUNK_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Reads a blob into memory.
+ * @param file the file (or any blob).
+ * @returns its bytes.
+ */
+export async function readFileBytes(file: Blob): Promise<ArrayBuffer> {
+  if (file.size <= LARGE_FILE_BYTES) return file.arrayBuffer();
+  const bytes = new Uint8Array(file.size);
+  for (let offset = 0; offset < file.size; offset += READ_CHUNK_BYTES) {
+    const end = Math.min(file.size, offset + READ_CHUNK_BYTES);
+    bytes.set(new Uint8Array(await file.slice(offset, end).arrayBuffer()), offset);
+  }
+  return bytes.buffer;
+}
+
+/** What a probe that timed out leaves behind. */
+const EMPTY_PROBE = { width: 0, height: 0, duration: 0, fps: null } as const;
+
+/**
+ * Awaits `promise` with a deadline; on timeout or rejection the fallback
+ * stands in. Nothing here may reject: probing is best-effort by definition.
+ * @param promise the probe.
+ * @param ms the budget.
+ * @param fallback the value to use when the budget runs out.
+ * @returns the probe's answer or the fallback.
+ */
+function timeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return new Promise<T>((resolve) => {
+    let settled = false;
+    const finish = (value: T): void => {
+      if (settled) return;
+      settled = true;
+      resolve(value);
+    };
+    const timer = globalThis.setTimeout(() => finish(fallback), ms);
+    promise.then(
+      (value) => {
+        globalThis.clearTimeout(timer);
+        finish(value);
+      },
+      () => {
+        globalThis.clearTimeout(timer);
+        finish(fallback);
+      },
+    );
+  });
+}
+
 /** A cache entry: a decoded frame and when it was last used. */
 interface CacheEntry {
   image: RenderImage;
@@ -131,8 +196,14 @@ export class MediaDecoder {
     let channels = 0;
 
     if (this.container === 'mp4' || this.container === 'mov') {
-      const buffer = await this.file.arrayBuffer();
-      this.demuxer = MP4Demuxer.open(buffer);
+      try {
+        const buffer = await readFileBytes(this.file);
+        this.demuxer = MP4Demuxer.open(buffer);
+      } catch {
+        // A truncated/corrupt MP4 must not abort the import: the asset still
+        // lands in the library and its card falls back to the placeholder.
+        this.demuxer = null;
+      }
       if (this.demuxer) {
         this.videoTrack = this.demuxer.tracks.find((track) => track.kind === 'video') ?? null;
         this.audioTrack = this.demuxer.tracks.find((track) => track.kind === 'audio') ?? null;
@@ -154,7 +225,7 @@ export class MediaDecoder {
     }
 
     if (type === 'image') {
-      const bitmap = await this.decodeStill();
+      const bitmap = await timeout(this.decodeStill(), METADATA_TIMEOUT_MS, null);
       if (bitmap) {
         const size = intrinsicSize(bitmap);
         width = size.width;
@@ -164,32 +235,34 @@ export class MediaDecoder {
       durationSeconds = 0;
       fps = FrameRate.THIRTY;
     } else if (durationSeconds === 0) {
-      // Probe duration through a media element (webm, wav, mp3, ...).
-      const probe = await probeElement(this.file, type);
+      // Probe duration through a media element (webm, wav, mp3, ...). The
+      // budget is hard: a file whose element never fires `loadedmetadata`
+      // must not hold the import hostage.
+      const probe = await timeout(probeElement(this.file, type), METADATA_TIMEOUT_MS, EMPTY_PROBE);
       width = probe.width || width;
       height = probe.height || height;
       durationSeconds = probe.duration || durationSeconds;
       fps = probe.fps ?? fps;
-      if (probe.width > 0) width = probe.width;
-      if (probe.height > 0) height = probe.height;
     }
 
     // Fase 4 hook: nothing native could read the file → ask FFmpeg.
     let viaFallback = false;
     if (type !== 'image' && durationSeconds === 0 && width === 0 && this.fallback) {
       try {
-        const probe = await this.fallback.probe(this.file);
-        const video = probe.streams.find((stream) => stream.type === 'video');
-        const audio = probe.streams.find((stream) => stream.type === 'audio');
-        durationSeconds = probe.duration.asNumber();
-        width = video?.width ?? 0;
-        height = video?.height ?? 0;
-        videoCodec = video?.codec ?? '';
-        audioCodec = audio?.codec ?? '';
-        sampleRate = audio?.sampleRate ?? 0;
-        channels = audio?.channels ?? 0;
-        if (video?.fps) fps = FrameRate.checked(Math.round(video.fps * 1000), 1000) ?? fps;
-        viaFallback = durationSeconds > 0 || width > 0;
+        const probe = await timeout(this.fallback.probe(this.file), METADATA_TIMEOUT_MS, null);
+        if (probe) {
+          const video = probe.streams.find((stream) => stream.type === 'video');
+          const audio = probe.streams.find((stream) => stream.type === 'audio');
+          durationSeconds = probe.duration.asNumber();
+          width = video?.width ?? 0;
+          height = video?.height ?? 0;
+          videoCodec = video?.codec ?? '';
+          audioCodec = audio?.codec ?? '';
+          sampleRate = audio?.sampleRate ?? 0;
+          channels = audio?.channels ?? 0;
+          if (video?.fps) fps = FrameRate.checked(Math.round(video.fps * 1000), 1000) ?? fps;
+          viaFallback = durationSeconds > 0 || width > 0;
+        }
       } catch {
         // FFmpeg unavailable or the file is unreadable: keep the empty probe.
       }
@@ -316,7 +389,7 @@ export class MediaDecoder {
       if (!this.audioBuffer && typeof AudioContext !== 'undefined') {
         const context = new AudioContext();
         try {
-          const buffer = await context.decodeAudioData(await this.file.arrayBuffer());
+          const buffer = await context.decodeAudioData(await readFileBytes(this.file));
           this.audioBuffer = buffer;
         } finally {
           void context.close();
@@ -619,7 +692,17 @@ function rateOf(track: DemuxTrack): FrameRate {
 }
 
 /** Waits for one `seeked` event. */
-function seekElement(element: HTMLVideoElement, time: number): Promise<void> {
+/**
+ * Seeks a media element and resolves when it lands (or after 250 ms).
+ *
+ * Exported because it is the exact place where a non-finite `currentTime`
+ * used to be assigned; the regression suite drives it with a stand-in
+ * element to prove `NaN` never reaches the property.
+ * @param element the media element.
+ * @param time the wanted instant; non-finite values are clamped to 0.
+ * @returns a promise that settles on `seeked` (or the timeout).
+ */
+export function seekElement(element: HTMLVideoElement, time: number): Promise<void> {
   return new Promise((resolve) => {
     const done = () => {
       element.removeEventListener('seeked', done);
@@ -686,7 +769,7 @@ export interface DurationProbeElement {
  * @param timeoutMs how long to wait for the reveal (default 2.5 s).
  * @returns the discovered finite duration, or 0 when it never appeared.
  */
-export function revealDuration(element: DurationProbeElement, timeoutMs = 2500): Promise<number> {
+export function revealDuration(element: DurationProbeElement, timeoutMs = METADATA_TIMEOUT_MS): Promise<number> {
   const known = finiteDuration(element.duration);
   if (known > 0) return Promise.resolve(known);
   return new Promise<number>((resolve) => {
@@ -728,17 +811,23 @@ async function probeElement(
     return { width: 0, height: 0, duration: 0, fps: null };
   }
   const url = URL.createObjectURL(file);
+  const element = document.createElement(type === 'audio' ? 'audio' : 'video');
   try {
-    const element = document.createElement(type === 'audio' ? 'audio' : 'video');
     element.preload = 'metadata';
     element.src = url;
     await new Promise<void>((resolve) => {
-      const done = () => {
+      let settled = false;
+      const done = (): void => {
+        if (settled) return;
+        settled = true;
         element.removeEventListener('loadedmetadata', done);
+        element.removeEventListener('error', done);
         resolve();
       };
       element.addEventListener('loadedmetadata', done);
-      globalThis.setTimeout(done, 3000);
+      // A file the engine cannot even open fires `error`, not metadata.
+      element.addEventListener('error', done);
+      globalThis.setTimeout(done, METADATA_TIMEOUT_MS);
     });
     // Fase 7+: OBS/stream-shaped files answer `Infinity` (or `NaN`) here —
     // reveal the real duration with the seek-to-the-end trick instead of
@@ -754,6 +843,15 @@ async function probeElement(
       fps: null,
     };
   } finally {
+    // Cleanup in a fixed order: detach, stop the loader, then free the URL.
+    // Leaving the element fetching a revoked blob keeps a decoder alive for
+    // the whole session (the reported "import se queda colgado" leak).
+    element.removeAttribute('src');
+    try {
+      element.load();
+    } catch {
+      // Detached elements may refuse `load()`; nothing to do about it.
+    }
     URL.revokeObjectURL(url);
   }
 }

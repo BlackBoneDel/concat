@@ -71,6 +71,11 @@ import { openProxyStorage } from './storage/proxy-store.ts';
 import { waveformCache } from './media/waveform-generator.ts';
 // Fase 7+: timeline drop capture and the ?debug=1 diagnostics panel.
 import { installDropGuard, installFileDrop } from './ui/timeline/file-drop.ts';
+// Fase 9: the app-wide capture of dropped OS files and the persistent picker.
+import { installGlobalDrop, type GlobalDropHandle } from './ui/global-drop.ts';
+import { installGlobalFileInput } from './ui/global-file-input.ts';
+import { planImport } from './media/media-pool.ts';
+import { trackKindOf } from './editor/operations.ts';
 import { mountDebugPanel } from './ui/debug-panel.ts';
 import { formatEta } from './export/bitrate-estimator.ts';
 import type { OpenedPackage } from './storage/project-package.ts';
@@ -121,6 +126,20 @@ type ProductionStorage = Omit<import('./ui/modals/storage-manager-modal.ts').Sto
 /** Subtitle files routed to the subtitle importer. */
 const SUBTITLE_FILE = /\.(srt|vtt)$/i;
 
+/** Where an OS file dropped on the timeline wants its clip. */
+export interface ImportPlacement {
+  /** Seconds into the timeline. */
+  time: number;
+  /** The lane under the pointer, when there was one. */
+  trackId: string | null;
+}
+
+/** Options of {@link EditorApp.importFiles}. */
+export interface ImportFilesOptions {
+  /** Set when the files were dropped on the timeline: insert them there. */
+  place?: ImportPlacement | null;
+}
+
 /** The editor application. */
 class EditorApp implements AppContext {
   session = new EditSession();
@@ -163,6 +182,8 @@ class EditorApp implements AppContext {
   /** Fase 6: the I/O range badge in the header. */
   private rangeBadge: HTMLElement | null = null;
   private autosaveTimer: ReturnType<typeof setInterval> | null = null;
+  /** Fase 9: the window-wide capture of dropped OS files. */
+  private globalDrop: GlobalDropHandle | null = null;
 
   constructor() {
     this.mediaStore = new MediaStore(new MemoryKeyValue());
@@ -253,13 +274,33 @@ class EditorApp implements AppContext {
     this.timelinePanel = new TimelinePanel(layout.timelinePanel, this);
     this.inspectorPanel = new InspectorPanel(layout.inspectorPanel, this);
 
-    // Fase 7+: OS file drops on the timeline import into the library, and a
-    // window-level guard stops the browser navigating away on any other
-    // drop (the old behaviour opened the raw file and lost the session).
+    // Fase 9: the library card appears the instant the pool registers the
+    // asset, not when its probe lands (the "no pasa nada al soltar el MP4").
+    this.pool.setImportListeners({
+      onMediaAdded: () => document.dispatchEvent(new CustomEvent('media-library-changed')),
+      onMediaUpdated: () => document.dispatchEvent(new CustomEvent('media-library-changed')),
+    });
+
+    // Fase 7+: OS file drops on the timeline import into the library and land
+    // on the lane under the pointer.
     installFileDrop(layout.timelinePanel, {
+      onFiles: (files, point) => {
+        const target = this.timelinePanel?.dropTargetAt(point.x, point.y) ?? null;
+        void this.importFiles(files, { place: target });
+      },
+    });
+    // Fase 9: the last line of defence. A file let go of anywhere else —
+    // header, preview, empty workspace, the body — imports too, and the
+    // browser never navigates to the raw file. `installDropGuard` is kept so
+    // the older structural tests keep watching the same invariant.
+    installDropGuard();
+    this.globalDrop = installGlobalDrop({
       onFiles: (files) => void this.importFiles(files),
     });
-    installDropGuard();
+    // Fase 9: one persistent picker in the DOM for every import affordance.
+    installGlobalFileInput({
+      onFiles: (files) => void this.importFiles(files),
+    });
     // Fase 7+: `?debug=1` mounts the diagnostics panel (engine, codecs,
     // OPFS/IndexedDB, service worker caches) for import troubleshooting.
     void mountDebugPanel(document.body);
@@ -317,38 +358,140 @@ class EditorApp implements AppContext {
 
   // -- AppContext ----------------------------------------------------------
 
-  async importFiles(files: File[]): Promise<void> {
+  /**
+   * Imports dropped/picked files.
+   *
+   * Every route into the app (the Import button, Archivo → Importar medios,
+   * Ctrl+I, an OS drop anywhere) ends up here, so the validation, the toasts
+   * and the logs are the same for all of them. Files the browser cannot use
+   * are refused with a toast *before* any work starts — no phantom card with
+   * a 0-second duration.
+   * @param files the files.
+   * @param options `place` inserts what was imported on the timeline (an OS
+   * file dropped on the timeline).
+   */
+  async importFiles(files: File[], options: ImportFilesOptions = {}): Promise<void> {
+    console.info(`[MediaImport] received ${files.length}`);
     // Fase 4: subtitles go to their own importer; media through the
     // BulkImporter (2 in parallel, per-file errors never stop the batch).
-    for (const file of files.filter((f) => SUBTITLE_FILE.test(f.name))) await this.media.importSubtitles(file);
-    const media = files.filter((f) => !SUBTITLE_FILE.test(f.name));
+    const subtitles = files.filter((f) => SUBTITLE_FILE.test(f.name));
+    for (const file of subtitles) await this.media.importSubtitles(file);
+
+    const candidates = files.filter((f) => !SUBTITLE_FILE.test(f.name));
+    const media: File[] = [];
+    for (const file of candidates) {
+      const plan = planImport(file);
+      if (plan.ok) {
+        media.push(file);
+        continue;
+      }
+      // Empty and non-media files never reach the pool: no ghost asset, and
+      // the user is told why.
+      console.warn(`[MediaImport] error ${file.name}: ${plan.message}`);
+      if (plan.code === 'unsupported') this.notifications.warning('Formato no compatible', `${file.name} no es un archivo de vídeo, audio o imagen.`);
+      else this.notifications.warning('El archivo está vacío', `${file.name} no tiene contenido.`);
+    }
+
+    const imported: MediaItem[] = [];
     if (media.length > 0) {
-      const importer = new BulkImporter<MediaItem>((source) => this.importOne(source.file), { concurrency: 2, acceptUnknown: true });
+      const importer = new BulkImporter<MediaItem>((source) => this.importOne(source.file), { concurrency: 2 });
       for await (const event of importer.run(media)) {
-        if (event.type === 'complete') this.notifications.success('Medio importado', event.result.name);
-        else if (event.type === 'error') this.notifications.error('Error al importar', `${event.name}: ${event.error}`);
+        if (event.type === 'complete') {
+          imported.push(event.result);
+          console.info(`[MediaImport] ok ${event.result.name}`);
+          this.notifications.success('Medio importado', event.result.name);
+        } else if (event.type === 'error') {
+          console.warn(`[MediaImport] error ${event.name}: ${event.error}`);
+          this.notifications.error('Error al importar', `${event.name}: ${event.error}`);
+        }
       }
     }
+    if (options.place && imported.length > 0) this.placeOnTimeline(imported, options.place);
     document.dispatchEvent(new CustomEvent('media-library-changed'));
     this.requestAutosave();
   }
 
   /**
+   * Fase 9: puts just-imported media on the timeline — what an OS file
+   * dropped *on* the timeline means. The lane under the pointer wins when it
+   * fits; otherwise a lane of the right kind is reused, or created.
+   * @param items the imported bin entries.
+   * @param target where the drop landed.
+   */
+  private placeOnTimeline(items: MediaItem[], target: ImportPlacement): void {
+    const session = this.session;
+    let at = Math.max(0, target.time);
+    for (const item of items) {
+      const kind: 'video' | 'audio' = item.kind === 'audio' ? 'audio' : 'video';
+      const trackId = this.resolveTrackFor(kind, target.trackId);
+      if (trackId === null) {
+        this.notifications.error('No se pudo añadir el clip', 'El timeline no tiene pistas disponibles.');
+        return;
+      }
+      try {
+        const clipId = session.insertClipFromMedia(item.id, trackId, Rational.approximate(at) ?? Rational.ZERO, 'overwrite', {
+          durationSeconds: item.duration && item.duration > 0 ? item.duration : 5,
+          kind,
+          name: item.name,
+        });
+        this.history.push(session.document, session.documentSettings());
+        this.selectedClipId = clipId;
+        at += Math.max(0.1, item.duration ?? 0);
+      } catch (error) {
+        this.reportError('No se pudo añadir el clip', error);
+        return;
+      }
+    }
+    this.refreshAll();
+    this.requestRender();
+    document.dispatchEvent(new CustomEvent('timeline-changed'));
+  }
+
+  /**
+   * Picks the lane a clip of `kind` should land on: the one under the
+   * pointer when it accepts it, the first lane of that kind, or a new one.
+   * @param kind what the clip needs.
+   * @param preferred the lane under the pointer, if any.
+   * @returns the lane id, or `null` when one could not be made.
+   */
+  private resolveTrackFor(kind: 'video' | 'audio', preferred: string | null): string | null {
+    const session = this.session;
+    const tracks = session.timeline.tracks;
+    const fits = (trackId: string): boolean => {
+      const track = tracks.find((candidate) => candidate.id === trackId);
+      return track !== undefined && trackKindOf(session.document, track) === kind;
+    };
+    if (preferred !== null && fits(preferred)) return preferred;
+    const existing = tracks.find((track) => trackKindOf(session.document, track) === kind);
+    if (existing) return existing.id;
+    return session.addTrack(kind, session.timeline.tracks.length);
+  }
+
+  /**
    * Imports one file: pool, OPFS, bin item, waveforms, fingerprint and the
    * automatic proxy policy (Fase 4).
+   *
+   * The pool registers the asset (and the library card) synchronously; this
+   * method then waits — with a hard budget inside the pool — for the probe,
+   * because the durable copy in OPFS is keyed to the probed metadata. A file
+   * whose probe failed still lands in the bin: `duration` falls back to a
+   * usable default so it can be dropped on the timeline.
    * @param file the local file.
    * @returns the new bin item.
    */
   async importOne(file: File): Promise<MediaItem> {
     const id = crypto.randomUUID();
-    const asset = await this.pool.addMedia(file, id, file.name);
+    await this.pool.addMedia(file, id, file.name);
+    const asset = (await this.pool.whenReady(id)) ?? this.pool.getAsset(id);
+    if (!asset) throw new Error('El archivo no se pudo registrar en la biblioteca');
     const info = this.pool.getDecoder(id)?.mediaInfo;
-    if (info) await this.mediaStore.importFile(file, info, id, file.name);
+    if (info && asset.status !== 'error') await this.mediaStore.importFile(file, info, id, file.name);
     const item = this.toMediaItem(asset.id, asset.name, asset);
     this.session.addMediaItem(item);
+    if (asset.thumbnailUrl !== '') this.refreshAll();
     void this.generateWaveforms(file, asset.id);
     // Fase 8: the timeline filmstrip of the new media builds in the background.
-    if (asset.type !== 'audio') void this.pool.ensureThumbnailStrip(asset.id);
+    if (asset.type !== 'audio' && asset.status !== 'error') void this.pool.ensureThumbnailStrip(asset.id);
     void this.media.fingerprint(id, file);
     if (info) this.media.autoProxy(id, info);
     return item;
@@ -934,13 +1077,17 @@ class EditorApp implements AppContext {
   /** Loads the persisted media back into the pool at boot. */
   private async restoreMediaLibrary(): Promise<void> {
     const records = await this.mediaStore.list();
+    let restored = 0;
     for (const record of records) {
       const blob = await this.mediaStore.readFile(record.id);
       if (!blob) continue;
       await this.pool.addMedia(blob, record.id, record.name);
+      // Decoders have to exist before the first render asks for a frame.
+      const asset = await this.pool.whenReady(record.id);
+      if (asset) restored += 1;
     }
-    if (records.length > 0) {
-      this.notifications.info('Biblioteca restaurada', `${records.length} medios disponibles.`);
+    if (restored > 0) {
+      this.notifications.info('Biblioteca restaurada', `${restored} medios disponibles.`);
       document.dispatchEvent(new CustomEvent('media-library-changed'));
     }
   }

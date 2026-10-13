@@ -21,6 +21,8 @@
 
 import { icon, iconButton } from './components/icons.ts';
 import { writeMediaDrag } from './dnd/media-drag.ts';
+import { markDropHandled } from './dnd/drop-handled.ts';
+import { GLOBAL_FILE_ACCEPT, openGlobalFileInput } from './global-file-input.ts';
 import type { MediaAsset } from '../media/media-pool.ts';
 import type { AppContext } from './app-context.ts';
 import { formatDuration } from '../player/timecode.ts';
@@ -207,8 +209,13 @@ export class MediaPanel {
     this.root.addEventListener('dragleave', () => this.drop.classList.remove('drag-over'));
     this.root.addEventListener('drop', (event) => {
       event.preventDefault();
+      // Claim the gesture: the window-level capture must not import the same
+      // files a second time when the event bubbles past this panel.
+      markDropHandled(event);
       this.drop.classList.remove('drag-over');
       const files = [...(event.dataTransfer?.files ?? [])];
+      if (files.length === 0) return;
+      console.info(`[MediaImport] received ${files.length} en el panel de medios`);
       const subtitles = files.filter((file) => SUBTITLE_FILE.test(file.name));
       const media = files.filter((file) => !SUBTITLE_FILE.test(file.name));
       if (media.length > 0) void this.ctx.importFiles(media);
@@ -267,14 +274,22 @@ export class MediaPanel {
     if (this.tab !== 'media') this.renderCatalog(this.tab);
   }
 
-  /** Opens the file picker. */
+  /**
+   * Opens the file picker — always through the persistent document-level
+   * input (`#concat-global-file-input`), so the picker survives the GC while
+   * the OS dialog is open and works in the engines that refuse to open a
+   * detached input. The local fallback keeps the panel usable on its own
+   * (unit tests, an embedded panel).
+   */
   openPicker(): void {
+    if (openGlobalFileInput()) return;
     const input = document.createElement('input');
     input.type = 'file';
     input.multiple = true;
-    input.accept = 'video/*,audio/*,image/*';
+    input.accept = GLOBAL_FILE_ACCEPT;
     input.addEventListener('change', () => {
       const files = [...(input.files ?? [])];
+      input.value = '';
       if (files.length > 0) void this.ctx.importFiles(files);
     });
     input.click();
@@ -297,6 +312,7 @@ export class MediaPanel {
     const card = document.createElement('button');
     card.type = 'button';
     card.className = `media-card${this.selectedId === asset.id ? ' selected' : ''}`;
+    card.dataset['status'] = asset.status;
     card.title = `${asset.name} — doble clic añade al timeline`;
 
     const thumbWrap = document.createElement('div');
@@ -311,11 +327,22 @@ export class MediaPanel {
       // Fase 7 hook: SVG glyph for audio-only assets.
       thumbWrap.appendChild(icon(asset.type === 'image' ? 'layers' : 'music', { size: 28, className: 'media-thumb-icon' }));
     }
-    // Fase 8: the duration badge rides the thumbnail, CapCut style.
+    // Fase 8: the duration badge rides the thumbnail, CapCut style. While the
+    // probe is in flight there is no honest duration to show, so the badge
+    // says what is happening instead of pretending "0.0s".
     const badge = document.createElement('span');
     badge.className = 'media-duration-badge';
-    badge.textContent = asset.type === 'image' ? 'Imagen' : formatDuration(asset.duration);
-    badge.title = asset.type === 'image' ? 'Fotograma fijo' : `Duración: ${formatDuration(asset.duration)}`;
+    if (asset.status === 'processing') badge.textContent = '…';
+    else if (asset.status === 'error') badge.textContent = '!';
+    else badge.textContent = asset.type === 'image' ? 'Imagen' : formatDuration(asset.duration);
+    badge.title =
+      asset.status === 'processing'
+        ? 'Analizando el archivo…'
+        : asset.status === 'error'
+          ? (asset.statusMessage ?? 'No se pudo leer el archivo')
+          : asset.type === 'image'
+            ? 'Fotograma fijo'
+            : `Duración: ${formatDuration(asset.duration)}`;
     thumbWrap.appendChild(badge);
     card.appendChild(thumbWrap);
 
@@ -326,13 +353,18 @@ export class MediaPanel {
     name.textContent = asset.name;
     const detail = document.createElement('div');
     detail.className = 'media-detail';
-    detail.textContent =
-      asset.type === 'image'
-        ? `${asset.width}×${asset.height}`
-        : `${formatDuration(asset.duration)} · ${asset.width}×${asset.height}`;
+    detail.textContent = this.detailText(asset);
+    if (asset.status === 'error') detail.classList.add('media-detail-error');
     meta.appendChild(name);
     meta.appendChild(detail);
     card.appendChild(meta);
+
+    if (asset.status === 'processing') {
+      const spinner = document.createElement('span');
+      spinner.className = 'media-processing';
+      spinner.setAttribute('aria-label', 'Analizando el archivo');
+      card.appendChild(spinner);
+    }
 
     const remove = document.createElement('span');
     remove.className = 'media-remove';
@@ -367,6 +399,21 @@ export class MediaPanel {
     card.addEventListener('dblclick', () => this.ctx.addMediaToTimeline(asset.id));
     this.makeDraggable(card, asset);
     return card;
+  }
+
+  /**
+   * The card's second line. Audio has no pixel size, so it must not print
+   * `0×0`; a processing card says so; a failed probe shows the reason.
+   * @param asset the asset.
+   * @returns the text.
+   */
+  private detailText(asset: MediaAsset): string {
+    if (asset.status === 'processing') return 'Analizando…';
+    if (asset.status === 'error') return asset.statusMessage ?? 'Archivo no legible';
+    if (asset.type === 'image') return `${asset.width}×${asset.height}`;
+    const duration = formatDuration(asset.duration);
+    if (asset.type === 'audio') return `${duration} · audio`;
+    return asset.width > 0 && asset.height > 0 ? `${duration} · ${asset.width}×${asset.height}` : duration;
   }
 
   /**
