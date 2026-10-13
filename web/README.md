@@ -1,4 +1,4 @@
-# Concat Web — editor de vídeo 100% local (Fases 1–7)
+# Concat Web — editor de vídeo 100% local (Fases 1–8)
 
 Port of [`jub0t/Concat`](https://github.com/jub0t/Concat) (the open-source,
 cross-platform video editor) to a **100% local web application**. No servers,
@@ -17,8 +17,8 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 3. **Preview player** — play/pause/seek/step/scrub over a `requestAnimationFrame`
    clock, `HH:MM:SS:FF` timecode with drop-frame 29.97/59.94, and a multitrack
    `AudioMixer` (mute/solo/VU/fades) re-synced on drift.
-4. **Editor shell** — header 48px + media panel 250px + preview canvas +
-   inspector 280px + timeline 250px, all resizable, dark/light/cyberpunk
+4. **Editor shell** — header 48px + media panel 300px + preview canvas +
+   inspector 320px + timeline 320px, all resizable, dark/light/cyberpunk
    themes, toast notifications, modal dialogs, full keyboard shortcuts.
 5. **Local storage** — OPFS for the file bytes (mandatory on import),
    IndexedDB (`ConcatMediaDB` / `ConcatProjectDB`) for metadata and projects,
@@ -56,6 +56,104 @@ no uploads, no telemetry: the edit never leaves the user's browser.
 9. **Rhythm** — autosave every 30s + restore on reopen, undo per gesture,
    real-time canvas preview, all colors from theme variables, full keyboard
    shortcuts that never fire while typing.
+
+## Fase 8 — arrastrar y soltar de verdad, tiras de miniaturas y HUD estilo CapCut
+
+### El fallo crítico: una tarjeta de la biblioteca no llegaba a la timeline
+
+Arrastrar un medio desde el panel izquierdo **no insertaba nada**: el panel
+publicaba el arrastre pero la timeline no lo escuchaba. Ahora las tarjetas son
+fuentes de arrastre reales (`draggable`, `effectAllowed = 'copy'`, fantasma
+propio escalado que se elimina en el siguiente *tick* y clase
+`media-card--dragging` mientras dura el gesto) y el panel de la timeline es la
+zona de destino:
+
+| Parte | Qué hace |
+|---|---|
+| `ui/dnd/media-drag.ts` | escribe `application/x-concat-media` (id), `application/x-concat-media-type`, `application/x-concat-media-duration` (racional como cadena) y `text/plain`; `readMediaDrag` valida lo que llega |
+| `ui/timeline/coord-utils.ts` | `pixelsToTime`, `timeToPixels`, `getTrackAtY`, `layoutRects` y `localPoint`: una sola aritmética de punteros, siempre contra el zoom y el scroll vivos |
+| `ui/timeline/media-drop.ts` | `dragenter`/`dragover`/`dragleave`/`drop` con clase `timeline-drop-active`, previsualización verde translúcida del clip que va a caer y guía magenta del imán; `Escape` cancela |
+| `ui/timeline/drop-preview.ts` | dibuja el fantasma: ancho = duración × px/s, alto de la pista, borde #4caf50; línea discontinua y pista nueva cuando el puntero está fuera de los carriles |
+| `EditSession.insertClipFromMedia(mediaId, trackId, atTime, mode)` | construye el `DocumentClip` (uuid nuevo, tipo vídeo/audio, nombre, `media_ref`, `start_time`, `source_start`, `source_duration`, transform por defecto, opacidad 1, `enabled`, `extra {}`) y ejecuta `InsertClipOperation` |
+
+Reglas del destino: el clip cae en el carril bajo el puntero; si no hay ninguno
+se **crea una pista** al final (vídeo salvo que el medio sea audio) y se dibuja
+al borde inferior. `Shift` desactiva el imán; por defecto imanta a playhead,
+marcadores, bordes de clip, segundos y límites con la guía magenta. Al soltar:
+un paso de historial, `toast` de éxito y `console.info('[TimelineDrop] …')`; si
+la pista rechaza el clip, el error se informa sin romper nada. El evento se marca
+con `markDropHandled` para que la guardia global de archivos del PR #4 no lo
+procese dos veces.
+
+### Tiras de miniaturas dentro de los clips
+
+- `media/thumbnail-strip.ts` genera una tira de 4–40 fotogramas **equidistantes**
+  (uno cada 1,5 s, 160×90, `ImageBitmap`) y la guarda en el almacén
+  `thumbnail_strips` de `ConcatMediaDB` (v4) con degradado a memoria; la
+  generación cede el hilo entre fotogramas para no bloquear la interfaz.
+- El clip de vídeo pinta la tira **solo a partir de 20 px/s**; por debajo usa la
+  miniatura única, y mientras la tira se construye dibuja un marcador de posición
+  a cuadros (nunca un hueco vacío). Los fotogramas se indexan por tiempo de
+  origen, así que al recortar o acelerar el clip la tira sigue a la imagen.
+- `MediaPool` publica `media-strips-changed` cuando una tira está lista o cambia
+  el vínculo del medio, y la timeline se repinta sola.
+
+### Clips: aspecto profesional
+
+| Rasgo | Valor |
+|---|---|
+| Cuerpo | degradado por tipo (`#2b4a7a`→`#1e3a66` en vídeo, `#2d5a3d`→`#1e4027` en audio, violeta en imagen) con borde superior de 2 px |
+| Nombre | barra opaca de 18 px (`rgba(0,0,0,0.4)`), texto blanco de 11 px con sombra y puntos suspensivos |
+| Tipo | icono vectorial dibujado en el canvas (película, onda, imagen, «T», capa) |
+| Selección | borde de 2 px `#ff3b3b`… `--clip-selected-border` (`#ffeb3b`) con resplandor |
+| Bloqueado | rayado diagonal; deshabilitado, opacidad 0.4; fades dibujados como rampas |
+
+### HUD estilo CapCut
+
+- **Retícula**: cabecera de 48 px, columnas de 300 px (medios) y 320 px
+  (detalles), timeline de 320 px, todo redimensionable como en la Fase 2.
+- **Paleta** (`theme-manager.ts`, tema oscuro): `#181818` de fondo, `#232323` de
+  panel, acento lima `#c4f000`, reproducción `#4caf50`, selección `#ffeb3b`,
+  playhead `#ff3838`. Los alias que el CSS usaba sin definir
+  (`--bg-primary`, `--bg-secondary`, `--bg-tertiary`, `--accent-primary`,
+  `--text-primary`, `--text-tertiary`…) ahora existen en los tres temas.
+- **Cabecera**: menús Archivo/Edición/**Ver**, nombre de proyecto editable en el
+  sitio (Enter guarda, Escape cancela), píldora «Guardado / Cambios sin guardar»,
+  iconos de ajustes y de plegado de paneles, y un botón **Exportar** lima.
+- **Biblioteca**: pestañas Medios, Texto, Transiciones, Efectos, Filtros y
+  Plantillas; árbol plegable con recuentos por tipo; botón Importar a todo lo
+  ancho; rejilla de 3 columnas con insignia de duración; catálogos reales
+  (`TEXT_PRESETS`, `TRANSITION_KINDS`, efectos, LUTs de la biblioteca,
+  `MOTION_PRESETS`), y el botón «Añadir» de un título crea el clip en el
+  playhead.
+- **Monitor**: cabecera con título, resolución · fps y engranaje.
+- **Timeline**: barra agrupada (añadir pista · deshacer/rehacer · dividir ·
+  borrar · herramientas V/C/B/N/U/Y/P · mano H · imán S · texto · mute),
+  indicador de cursor, zoom y ajuste; `.timeline-toolbar-btn` con estados
+  hover/activo, imán en verde cuando está armado y separadores
+  `.timeline-toolbar-separator`. El botón de mano arrastra la vista (cursor
+  `grab`), y el ruler oscuro marca segundos con ticks cortos y los pasos
+  etiquetados con ticks largos bajo un playhead rojo de 2 px con triángulo.
+- **Detalles**: cabecera propia, secciones Proyecto / Timeline / Contenido
+  (pistas, clips, duración, recuento de medios) y botón **Modificar** que
+  convierte las cifras del proyecto en campos editables.
+- Sin emojis en `src/`: todo glifo es SVG (`icon`, `iconButton`,
+  `createIconElement`), con las invariantes del set de la Fase 7 verificadas por
+  `tests/icons-complete.test.ts`.
+
+### Métricas (Fase 8)
+
+| Métrica | Valor |
+|---|---|
+| Tests | **956 / 94 archivos**, 0 fallos (892 del tronco + 64 nuevos) |
+| Typecheck | `npm run typecheck` sin errores |
+| Bundle principal | **171,28 KB gzip** (< 180 KB) — +12 KB sobre el tronco |
+| CSS | 39,72 KB (7,79 KB gzip) |
+
+Suites nuevas: `tests/drag-drop-timeline.test.ts` (15),
+`tests/clip-renderer-thumbnails.test.ts` (16),
+`tests/timeline-coords.test.ts` (12), `tests/hud-shell.test.ts` (15) e
+`tests/icons-complete.test.ts` (6).
 
 ## Fase 7 — sistema de iconos SVG, HUD profesional y QA
 

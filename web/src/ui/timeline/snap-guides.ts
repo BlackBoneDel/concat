@@ -7,11 +7,12 @@
  */
 
 import type { SnapCandidate } from '../../editor/snapping.ts';
+import { Rational } from '../../core/rational.ts';
 
 /** Paints snap guides in the overlay layer. */
 export class SnapGuides {
   private readonly layer: HTMLDivElement;
-  private readonly lines: HTMLDivElement[] = [];
+  private lines: HTMLDivElement[] = [];
 
   /**
    * @param overlay the overlay element of the timeline view.
@@ -45,6 +46,26 @@ export class SnapGuides {
   clear(): void {
     this.layer.textContent = '';
     this.lines.length = 0;
+  }
+
+  /**
+   * Shows a single guide at a time — the magenta line a media drop leaves at
+   * the instant it snapped to (the ghost's exact position).
+   * @param seconds the guide's time.
+   * @param timeToX time → content pixels.
+   * @param label tooltip text.
+   */
+  showDropGuide(seconds: number, timeToX: (seconds: number) => number, label = 'Snap'): void {
+    this.show([{ time: Rational.approximate(seconds) ?? Rational.ZERO, kind: 'playhead', label }], timeToX);
+    for (const line of this.lines) line.classList.add('tl-snap-guide-drop');
+  }
+
+  /** Hides the drop guide only. */
+  clearDropGuide(): void {
+    for (const line of this.lines) {
+      if (line.classList.contains('tl-snap-guide-drop')) line.remove();
+    }
+    this.lines = this.lines.filter((line) => line.isConnected);
   }
 
   /** Removes the layer (unmount). */

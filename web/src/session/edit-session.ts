@@ -51,7 +51,7 @@ import { EditHistory } from '../editor/history.ts';
 import { SelectionManager } from '../editor/selection.ts';
 import { ClipboardManager } from '../editor/clipboard.ts';
 import { SnapEngine } from '../editor/snapping.ts';
-import { KeyEase, type Json, type KeyProperty } from '../model/wire.ts';
+import { KeyEase, type ClipKind, type Json, type KeyProperty } from '../model/wire.ts';
 import { EditorSession, type SessionOptions } from './editor-session.ts';
 
 /** Options for {@link EditSession.constructor}. */
@@ -268,6 +268,46 @@ export class EditSession extends EditorSession {
         mode,
       ),
     );
+  }
+
+  /**
+   * Inserts a clip built from a library asset — what a media card dropped on
+   * the timeline needs. The clip is minted here (`c-…`), so the caller
+   * only has to know the asset, the lane and the time.
+   * @param mediaId the library asset.
+   * @param trackId the destination lane.
+   * @param atTime where the clip starts.
+   * @param mode insert pushes the tail, overwrite replaces what it covers.
+   * @param meta duration/kind/name for assets the document's bin does not
+   * know yet (a just-imported file); they win over the bin entry.
+   * @returns the id of the inserted clip.
+   * @throws when the media is unknown and no duration is supplied, or when
+   * the lane refuses the clip (wrong kind, locked document…).
+   */
+  insertClipFromMedia(
+    mediaId: string,
+    trackId: string,
+    atTime: Rational,
+    mode: InsertMode = 'overwrite',
+    meta: { durationSeconds?: number; kind?: ClipKind; name?: string } = {},
+  ): string {
+    const media = this.document.media.find((item) => item.id === mediaId);
+    const duration = meta.durationSeconds ?? media?.duration ?? null;
+    if (duration === null || !(duration > 0)) throw new Error(`Medio no encontrado: ${mediaId}`);
+    const kind: ClipKind =
+      meta.kind ?? (media?.kind === 'audio' ? 'audio' : media?.kind === 'image' ? 'image' : 'video');
+    const clip = cloneClip(createDefaultClip());
+    clip.id = newId('c-');
+    clip.mediaId = mediaId;
+    clip.trackId = trackId;
+    clip.name = meta.name ?? media?.name ?? mediaId;
+    clip.kind = kind;
+    clip.start = Math.max(0, atTime.asNumber());
+    clip.duration = Math.max(1 / 60, duration);
+    if (!this.run(new InsertClipOperation(clip, trackId, atTime, mode))) {
+      throw new Error(`No se pudo insertar el clip en la pista ${trackId}`);
+    }
+    return clip.id;
   }
 
   /**

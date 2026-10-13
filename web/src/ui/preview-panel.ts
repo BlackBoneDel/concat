@@ -18,7 +18,7 @@ import { Rational } from '../core/rational.ts';
 import type { AppContext } from './app-context.ts';
 import { formatTimecode, parseTimecode, isDropFrameRate } from '../player/timecode.ts';
 import { iconButton, setButtonIcon, setPressed, type IconName } from './components/icons.ts';
-import { PLAYHEAD_EVENT } from './ui-events.ts';
+import { PLAYHEAD_EVENT, PREVIEW_MUTE_EVENT } from './ui-events.ts';
 
 /** The centre-top panel of the shell. */
 export class PreviewPanel {
@@ -34,6 +34,8 @@ export class PreviewPanel {
   private readonly loopButton: HTMLButtonElement;
   private readonly muteButton: HTMLButtonElement;
   private volumeBeforeMute = 1;
+  /** Fase 8: "1920×1080 · 30 fps" de la cabecera. */
+  private readonly metaEl: HTMLElement;
   private rafSync = 0;
 
   /**
@@ -45,6 +47,24 @@ export class PreviewPanel {
     this.ctx = ctx;
 
     // -- stage
+    // Fase 8: la cabecera del monitor (título + formato + ajustes).
+    const header = document.createElement('div');
+    header.className = 'panel-header preview-header';
+    const title = document.createElement('h2');
+    title.className = 'panel-title';
+    title.textContent = 'Previsualización';
+    this.metaEl = document.createElement('span');
+    this.metaEl.className = 'preview-meta';
+    header.append(title, this.metaEl);
+    header.appendChild(
+      iconButton({
+        icon: 'settings',
+        label: 'Ajustes del proyecto',
+        className: 'preview-header-btn',
+        onClick: () => document.dispatchEvent(new CustomEvent('open-project-settings')),
+      }),
+    );
+    this.root.appendChild(header);
     const stage = document.createElement('div');
     stage.className = 'preview-stage';
     this.canvas = document.createElement('canvas');
@@ -130,6 +150,8 @@ export class PreviewPanel {
     });
     right.appendChild(this.volume);
 
+    // Fase 8: the timeline toolbar's mute button drives the same state.
+    document.addEventListener(PREVIEW_MUTE_EVENT, () => this.toggleMute());
     this.quality = document.createElement('select');
     this.quality.className = 'transport-quality';
     for (const [value, label] of [
@@ -168,6 +190,7 @@ export class PreviewPanel {
     if (typeof ResizeObserver !== 'undefined') {
       new ResizeObserver(() => this.sizeCanvas()).observe(stage);
     }
+    this.refreshMeta();
     this.syncTime(Rational.ZERO);
   }
 
@@ -223,6 +246,16 @@ export class PreviewPanel {
     player.setLoop(range.start, range.end);
     setPressed(this.loopButton, true);
     this.loopButton.title = marked ? 'Bucle de entrada/salida activo' : 'Bucle de toda la línea de tiempo activo';
+  }
+
+  /** Fase 8: refreshes the format line from the document. */
+  refreshMeta(): void {
+    const doc = this.ctx.session.document;
+    const timeline = doc.timelines.find((candidate) => candidate.id === doc.activeTimelineId);
+    const video = timeline?.video;
+    this.metaEl.textContent = video
+      ? `${video.width}×${video.height} · ${Math.round(video.rateNum / video.rateDen)} fps`
+      : '';
   }
 
   /** Mutes/unmutes the preview, remembering the level. */

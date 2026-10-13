@@ -23,14 +23,20 @@ import {
   type LaneHit,
 } from './keyframe-track.ts';
 import type { KeyProperty } from '../../model/wire.ts';
+import { drawDropPreview, dropPreviewRect, type DropPreviewState } from './drop-preview.ts';
+import { StripRenderer } from './strip-renderer.ts';
 import { drawMarkers, drawRuler, markerAtPosition, RULER_HEIGHT } from './ruler.ts';
 import { ThumbnailRenderer } from './thumbnail-renderer.ts';
 import { drawTransitions } from './transitions-renderer.ts';
 import {
   readThemeColors,
+  TRACK_HEIGHT_AUDIO,
+  TRACK_HEIGHT_COLLAPSED,
+  TRACK_HEIGHT_VIDEO,
   type ClipDragPreview,
   type ClipPreviewer,
   type ThemeColors,
+  type ThumbnailStripProvider,
   type TimelineViewport,
   type TrackLayout,
 } from './types.ts';
@@ -40,10 +46,10 @@ import { WaveformRenderer } from './waveform-renderer.ts';
 export const MIN_PIXELS_PER_SECOND = 10;
 export const MAX_PIXELS_PER_SECOND = 500;
 
-/** Track heights in pixels. */
-const HEIGHT_COLLAPSED = 24;
-const HEIGHT_AUDIO = 72;
-const HEIGHT_VIDEO = 96;
+/** Track heights in pixels (the drop ghost reads the same numbers). */
+const HEIGHT_COLLAPSED = TRACK_HEIGHT_COLLAPSED;
+const HEIGHT_AUDIO = TRACK_HEIGHT_AUDIO;
+const HEIGHT_VIDEO = TRACK_HEIGHT_VIDEO;
 
 /** How much empty space is kept after the last clip (seconds). */
 const TAIL_SECONDS = 20;
@@ -66,6 +72,8 @@ export interface TimelineViewOptions {
   setPlayhead(seconds: number): void;
   /** Selection, for the highlight. */
   selection: SelectionManager;
+  /** Fase 8: where the filmstrips inside video clips come from. */
+  strips?: ThumbnailStripProvider | null;
 }
 
 /** Geometry + rendering of one timeline. */
@@ -96,7 +104,11 @@ export class TimelineView {
   private colorSignature = '';
   private readonly waveform: WaveformRenderer;
   private readonly thumbnails: ThumbnailRenderer;
+  /** Fase 8: filmstrips of the clips' media. */
+  private readonly strips: StripRenderer;
   private dragPreviewState: ClipDragPreview | null = null;
+  /** The ghost of a media card hovering the timeline (drop preview). */
+  private dropPreviewState: DropPreviewState | null = null;
   /** Fase 5: clips whose keyframe lane is open (⏷). */
   private readonly expandedClips = new Set<string>();
   /** Fase 5: the property each open lane shows. */
@@ -114,8 +126,10 @@ export class TimelineView {
     this.overlay = options.overlay;
     this.waveform = new WaveformRenderer();
     this.thumbnails = new ThumbnailRenderer(options.preview);
+    this.strips = new StripRenderer(options.strips ?? null);
     this.waveform.onUpdate(() => this.requestRender());
     this.thumbnails.onUpdate(() => this.requestRender());
+    this.strips.onUpdate(() => this.requestRender());
     this.rulerCanvas = document.createElement('canvas');
     this.rulerCanvas.className = 'tl-canvas tl-canvas-ruler';
     this.contentCanvas = document.createElement('canvas');
@@ -134,11 +148,13 @@ export class TimelineView {
   /** Detaches listeners and observers. */
   dispose(): void {
     this.disposed = true;
+    this.dropPreviewState = null;
     this.unsubscribeKeyframes();
     this.resizeObserver?.disconnect();
     this.resizeObserver = null;
     this.waveform.clear();
     this.thumbnails.clear();
+    this.strips.clear();
     this.rulerCanvas.remove();
     this.contentCanvas.remove();
     this.playheadEl.remove();
@@ -379,6 +395,7 @@ export class TimelineView {
       document: document_,
       waveform: this.waveform,
       thumbnails: this.thumbnails,
+      strips: this.strips,
       preview: this.dragPreviewState,
       expanded: this.expandedClips,
     });
@@ -403,6 +420,11 @@ export class TimelineView {
       viewport,
       colors,
     });
+    // The media card hovering the timeline: where the clip would land.
+    if (this.dropPreviewState) {
+      const rect = dropPreviewRect(this.dropPreviewState, this.layouts, viewport);
+      if (rect) drawDropPreview(contentCtx, rect);
+    }
     this.updatePlayhead();
   }
 
@@ -449,6 +471,28 @@ export class TimelineView {
   /** The current drag preview, if any. */
   dragPreview(): ClipDragPreview | null {
     return this.dragPreviewState;
+  }
+
+  /**
+   * Sets the drop ghost of a media card being dragged over the timeline
+   * (visual only; `null` clears it).
+   * @param preview the drag state, or `null`.
+   */
+  setDropPreview(preview: DropPreviewState | null): void {
+    const changed =
+      (this.dropPreviewState === null) !== (preview === null) ||
+      (preview !== null &&
+        this.dropPreviewState !== null &&
+        (this.dropPreviewState.trackId !== preview.trackId ||
+          this.dropPreviewState.atTime.compare(preview.atTime) !== 0 ||
+          this.dropPreviewState.pointerY !== preview.pointerY));
+    this.dropPreviewState = preview;
+    if (changed) this.requestRender();
+  }
+
+  /** The live drop ghost, if any. */
+  dropPreview(): DropPreviewState | null {
+    return this.dropPreviewState;
   }
 
   // -- Fase 5: keyframe lanes ------------------------------------------------
@@ -498,6 +542,11 @@ export class TimelineView {
     this.requestRender();
   }
 
+  /** A hit-test alias of {@link trackAtY} for the drop wiring. */
+  trackIdAtY(y: number): string | null {
+    return this.trackAtY(y)?.trackId ?? null;
+  }
+
   /**
    * Hit-tests the open lanes.
    * @param x content x.
@@ -526,6 +575,28 @@ export class TimelineView {
     const button = expandButtonRect(cx, layout.y - this.viewportState.scrollTop + FACE_PADDING, w);
     if (!button) return null;
     return x >= button.x && x <= button.x + button.w && y >= button.y && y <= button.y + button.h ? clip : null;
+  }
+
+  /**
+   * Fase 8: drops every cached filmstrip and repaints — after an import, a
+   * relink or a proxy change (the media's frames are new).
+   */
+  refreshStrips(): void {
+    this.strips.refresh();
+  }
+
+  /**
+   * Fase 8: invalidates one media's filmstrip.
+   * @param mediaId the media.
+   */
+  invalidateStrip(mediaId: string): void {
+    this.strips.invalidate(mediaId);
+    this.requestRender();
+  }
+
+  /** Fase 8: the filmstrip cache (diagnostics: media still being generated). */
+  get pendingStrips(): readonly string[] {
+    return this.strips.pending;
   }
 
   /** The overlay layer (selection box, snap guides). */

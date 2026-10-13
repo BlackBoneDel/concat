@@ -20,7 +20,7 @@ import {
   type EditOperation,
   type TrackKind,
 } from '../../editor/operations.ts';
-import { iconButton, setButtonIcon, setPressed, type IconName } from '../components/icons.ts';
+import { icon, iconButton, setButtonIcon, setPressed, type IconName } from '../components/icons.ts';
 
 /** What a header needs from its host. */
 export interface TrackHeaderOptions {
@@ -36,6 +36,8 @@ export class TrackHeader {
   readonly element: HTMLElement;
   private readonly options: TrackHeaderOptions;
   private readonly trackId: string;
+  /** Fase 8: the kind glyph (film / wave / text). */
+  private kindBadge!: HTMLElement;
 
   /**
    * @param trackId the track this header shows.
@@ -59,6 +61,9 @@ export class TrackHeader {
     if (!track) return;
     const kind: TrackKind = trackKindOf(doc, track);
     const name = typeof track.extra['name'] === 'string' ? track.extra['name'] : track.id;
+    // Fase 8: the type glyph of the lane, CapCut style.
+    this.kindBadge.replaceChildren(icon(trackGlyph(kind), { size: 13 }));
+    this.kindBadge.dataset['kindGlyph'] = kind;
     const locked = track.extra['locked'] === true;
     const collapsed = track.extra['collapsed'] === true;
     this.element.dataset['kind'] = kind;
@@ -106,6 +111,7 @@ export class TrackHeader {
     const kindBadge = document.createElement('span');
     kindBadge.className = 'tl-track-kind';
     kindBadge.setAttribute('aria-hidden', 'true');
+    this.kindBadge = kindBadge;
     const name = document.createElement('div');
     name.className = 'tl-track-name';
     name.textContent = this.trackId;
@@ -246,3 +252,12 @@ export class TrackHeader {
 
 /** Loads `currentTimeline` for consumers. */
 export { currentTimeline };
+
+/** Fase 8: the glyph of a lane kind.
+ * @param kind the lane's category.
+ * @returns the icon name.
+ */
+function trackGlyph(kind: TrackKind): IconName {
+  if (kind === 'audio') return 'volumeOn';
+  return 'film';
+}

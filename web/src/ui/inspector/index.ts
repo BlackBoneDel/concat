@@ -59,6 +59,14 @@ export class DynamicInspector {
     this.show();
   }
 
+  /**
+   * Fase 8: toggles the project sheet between values and editable fields.
+   * @param editing `true` to show the fields.
+   */
+  setProjectEditing(editing: boolean): void {
+    this.project.setEditing(editing);
+  }
+
   /** Picks the right sheet for the current selection. */
   show(): void {
     const doc = this.options.getDocument();

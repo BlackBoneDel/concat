@@ -126,6 +126,35 @@ const ICONS = {
     circle(15, 19, 1, { fill: 'currentColor' }),
   ],
   music: [path('M9 18V5l12-2v13'), circle(6, 18, 3), circle(18, 16, 3)],
+  // -- Fase 8: HUD estilo CapCut ------------------------------------------------
+  hand: [
+    path('M18 11V6a2 2 0 0 0-4 0v5'),
+    path('M14 10V4a2 2 0 0 0-4 0v2'),
+    path('M10 10.5V6a2 2 0 0 0-4 0v8'),
+    path('M18 8a2 2 0 1 1 4 0v6a8 8 0 0 1-8 8h-2a8 8 0 0 1-8-8v-1a2 2 0 0 1 4 0'),
+  ],
+  text: [path('M4 7V5h16v2'), path('M12 5v14'), path('M9 19h6')],
+  cursor: [path('M4 3l7.5 17 2.3-6.7 6.7-2.3Z')],
+  film: [rect(2.5, 4, 19, 16, 2), line(7, 4, 7, 20), line(17, 4, 17, 20), line(2.5, 9, 21.5, 9), line(2.5, 15, 21.5, 15)],
+  sparkles: [
+    path('M11 3l1.9 4.6L17.5 9.5l-4.6 1.9L11 16l-1.9-4.6L4.5 9.5l4.6-1.9Z'),
+    path('M19 14l.9 2.1 2.1.9-2.1.9-.9 2.1-.9-2.1-2.1-.9 2.1-.9Z'),
+  ],
+  sliders: [
+    line(4, 21, 4, 14),
+    line(4, 10, 4, 3),
+    line(12, 21, 12, 12),
+    line(12, 8, 12, 3),
+    line(20, 21, 20, 16),
+    line(20, 12, 20, 3),
+    line(1, 14, 7, 14),
+    line(9, 8, 15, 8),
+    line(17, 16, 23, 16),
+  ],
+  layers: [polygon('12 2 2 7 12 12 22 7 12 2'), polyline('2 17 12 22 22 17'), polyline('2 12 12 17 22 12')],
+  layoutGrid: [rect(3, 3, 7, 7, 1), rect(14, 3, 7, 7, 1), rect(14, 14, 7, 7, 1), rect(3, 14, 7, 7, 1)],
+  folder: [path('M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2Z')],
+  panelLeft: [rect(3, 3, 18, 18, 2), line(9, 3, 9, 21)],
   // -- system ------------------------------------------------------------------
   settings: [path(gearPath()), circle(12, 12, 3)],
   export: [path('M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'), polyline('17 8 12 3 7 8'), line(12, 3, 12, 15)],
@@ -245,6 +274,17 @@ export function iconMarkup(name: IconName, options: IconOptions = {}): string {
     .map(([tag, attrs]) => `<${tag} ${Object.entries(attrs).map(([key, value]) => `${key}="${escapeAttribute(String(value))}"`).join(' ')}/>`)
     .join('');
   return `<svg ${attributes}>${title}${children}</svg>`;
+}
+
+/**
+ * Fase 8: shorthand for a live SVG icon at a given size — what the HUD's
+ * builders use when they only need the glyph.
+ * @param name the glyph.
+ * @param size pixel size (18 by default).
+ * @returns the `<svg>` element.
+ */
+export function createIconElement(name: IconName, size = 18): SVGSVGElement {
+  return icon(name, { size });
 }
 
 /** Options of {@link iconButton}. */
