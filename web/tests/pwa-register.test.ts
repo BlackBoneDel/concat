@@ -4,7 +4,7 @@
 /** Fase 6: service-worker registration, install prompt and the public PWA files. */
 
 import { readFileSync } from 'node:fs';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { InstallPrompt, type PromptTarget } from '../src/pwa/install-prompt.ts';
 import { registerServiceWorker, type ContainerLike, type RegistrationLike, type WorkerLike } from '../src/pwa/sw-register.ts';
 
@@ -62,6 +62,15 @@ class FakeContainer implements ContainerLike {
 }
 
 describe('registerServiceWorker', () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it.each(['/concat/', '/concat', './', '/'])('registers within Vite base %s', async (base) => {
+    vi.stubEnv('BASE_URL', base);
+    const container = new FakeContainer();
+    await registerServiceWorker({ isProduction: true, container, checkInterval: 0 });
+    const scope = base.endsWith('/') ? base : `${base}/`;
+    expect(container.registered).toEqual([{ url: `${scope}sw.js`, scope }]);
+  });
   it('does nothing in development or without support', async () => {
     const container = new FakeContainer();
     expect((await registerServiceWorker({ isProduction: false, container })).registration).toBeNull();
@@ -75,7 +84,7 @@ describe('registerServiceWorker', () => {
     const container = new FakeContainer();
     let ready = 0;
     const result = await registerServiceWorker({ isProduction: true, container, onOfflineReady: () => (ready += 1), checkInterval: 0 });
-    expect(container.registered).toEqual([{ url: './sw.js', scope: './' }]);
+    expect(container.registered).toEqual([{ url: `${import.meta.env.BASE_URL}sw.js`, scope: import.meta.env.BASE_URL }]);
     const worker = new FakeWorker();
     container.registration.found(worker);
     worker.become('installed');
@@ -210,21 +219,21 @@ describe('public PWA files', () => {
   });
 });
 
-// -- Fase 7+: invalidación del cache del SW a v7 ---------------------------
+// -- Fase 7+: invalidación del cache del SW a v8 ---------------------------
 
 import { SW_CACHE_VERSION } from '../src/pwa/sw-register.ts';
 
-describe('service-worker cache v7', () => {
+describe('service-worker cache v8', () => {
   const readSw = (): string => readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
 
-  it('declara CACHE_VERSION v7', () => {
-    expect(readSw()).toMatch(/const CACHE_VERSION = 'v7';/);
-    expect(SW_CACHE_VERSION).toBe('v7');
+  it('declara CACHE_VERSION v8', () => {
+    expect(readSw()).toMatch(/const CACHE_VERSION = 'v8';/);
+    expect(SW_CACHE_VERSION).toBe('v8');
   });
 
   it('los nombres de cache incluyen la versión y el build id', () => {
     const sw = readSw();
-    expect(sw).toContain('concat-${CACHE_VERSION}-${BUILD_ID}');
+    expect(sw).toContain('concat-web-${CACHE_VERSION}-${BUILD_ID}');
     expect(sw).toContain('concat-runtime-${CACHE_VERSION}-${BUILD_ID}');
   });
 

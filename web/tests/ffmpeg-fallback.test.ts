@@ -7,7 +7,7 @@
 
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   FFmpegFallback,
   FFmpegUnavailableError,
@@ -110,6 +110,25 @@ describe('argv and parsing', () => {
     expect(channelsOfLayout('3 channels')).toBe(3);
     expect(channelsOfLayout('quad')).toBe(4);
     expect(channelsOfLayout('weird')).toBe(2);
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it.each([
+    ['./', 'https://blackbonedel.github.io/concat/', '/concat/'],
+    ['./', 'https://blackbonedel.github.io/concat/index.html', '/concat/'],
+    ['/concat/', 'https://blackbonedel.github.io/concat/', '/concat/'],
+    ['/concat', 'https://blackbonedel.github.io/concat/', '/concat/'],
+    ['/', 'https://blackbonedel.github.io/', '/'],
+  ])('resolves core and wasm with base %s at %s', (base, page, expected) => {
+    vi.stubEnv('BASE_URL', base);
+    vi.stubGlobal('document', { baseURI: page });
+    const urls = vendoredCoreUrls();
+    expect(urls.coreURL).toBe(`https://blackbonedel.github.io${expected}vendor/ffmpeg/ffmpeg-core.js`);
+    expect(urls.wasmURL).toBe(`https://blackbonedel.github.io${expected}vendor/ffmpeg/ffmpeg-core.wasm`);
   });
 
   it('resolves the vendored URLs against the document, never a CDN', () => {
