@@ -44,6 +44,13 @@ export interface MediaDropOptions {
   kindForMedia(payload: MediaDragPayload): 'video' | 'audio';
   /** Creates a lane and returns its id (`null` on failure). */
   createTrack(kind: 'video' | 'audio'): string | null;
+  /**
+   * The kind of an existing lane (needed to route an audio card dropped over
+   * a video lane to an audio one instead of failing).
+   */
+  trackKind?(trackId: string): 'video' | 'audio' | null;
+  /** The first lane of `kind`, if the document has one. */
+  trackOfKind?(kind: 'video' | 'audio'): string | null;
   /** Inserts the clip; throws (or returns `false`) when the document refuses. */
   insert(payload: MediaDragPayload, trackId: string, atTime: Rational, mode: DropMode): void;
   /** Visual-only preview updates (`null` clears it). */
@@ -159,15 +166,22 @@ export function installMediaDrop(options: MediaDropOptions): MediaDropHandle {
       cancelled = false;
       return;
     }
+    const wanted = dropped.kind;
+    const kindOf = (id: string): 'video' | 'audio' | null => options.trackKind?.(id) ?? null;
     let trackId = dropped.trackId;
     let createdTrack = false;
     try {
+      // Dropping an audio card over a video lane (or the reverse) is not an
+      // error the user has to read about: the drop lands on a lane of the
+      // right kind — the first one, or a brand-new lane below the last.
+      if (trackId !== null && options.trackKind && kindOf(trackId) !== wanted) {
+        trackId = options.trackOfKind?.(wanted) ?? null;
+      }
       if (trackId === null) {
-        trackId = options.createTrack(dropped.kind);
+        trackId = options.createTrack(wanted);
         createdTrack = true;
         if (trackId === null) throw new Error('No se pudo crear la pista');
       }
-      // Dropping over a lane of the other kind is a mistake worth reporting.
       options.insert(payload, trackId, dropped.atTime, 'overwrite');
     } catch (error) {
       options.onError?.(error);

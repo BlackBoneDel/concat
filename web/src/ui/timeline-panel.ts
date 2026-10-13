@@ -204,6 +204,16 @@ export class TimelinePanel {
         ),
       snap: (time, candidates) => session.snapping.snap(time, this.view?.zoom() ?? 80, candidates),
       kindForMedia: (payload) => (payload.kind === 'audio' ? 'audio' : 'video'),
+      // Fase 9: an audio card dropped over a video lane must land on an audio
+      // lane (or a new one), not fail with "no se pudo insertar el clip".
+      trackKind: (trackId) => {
+        const track = session.timeline.tracks.find((candidate) => candidate.id === trackId);
+        return track ? trackKindOf(session.document, track) : null;
+      },
+      trackOfKind: (kind) => {
+        const track = session.timeline.tracks.find((candidate) => trackKindOf(session.document, candidate) === kind);
+        return track?.id ?? null;
+      },
       createTrack: (kind) => {
         // Appended below the last lane: that is where the ghost is drawn.
         const trackId = session.addTrack(kind, session.timeline.tracks.length);
@@ -364,6 +374,27 @@ export class TimelinePanel {
   /** Public refresh (app events). */
   refresh(): void {
     this.refreshAll();
+  }
+
+  /**
+   * Fase 9: what a point of this panel means — the time under the pointer and
+   * the lane there. Used for OS files dropped on the timeline: they are
+   * imported and then placed where the user let go.
+   * @param x pixels from the panel's left edge (as `installFileDrop` reports).
+   * @param y pixels from the panel's top edge.
+   * @returns the placement, or `null` when the view is not up.
+   */
+  dropTargetAt(x: number, y: number): { time: number; trackId: string | null } | null {
+    const view = this.view;
+    if (!view) return null;
+    const content = view.contentRect();
+    const panel = this.root.getBoundingClientRect();
+    const contentX = panel.left + x - content.left;
+    const contentY = panel.top + y - content.top;
+    return {
+      time: Math.max(0, view.xToTime(contentX)),
+      trackId: view.trackIdAtY(contentY),
+    };
   }
 
   /** Zooms in (menu/shortcut). */
@@ -821,6 +852,12 @@ export class TimelinePanel {
       const seconds = this.app.player.currentTime.asNumber();
       const x = this.view.timeToX(seconds);
       this.playhead.setPosition(x, seconds);
+      // Fase 9: two elements paint the playhead — this panel's draggable line
+      // and the view's own (`TimelineView.updatePlayhead`, the one drawn over
+      // the clip canvas). The view's was only repositioned on edits and
+      // scrubs, so during playback the timeline showed the moving line plus a
+      // frozen red line where play had started: "el playhead no responde".
+      this.view.updatePlayhead();
       if (x < 0 || x > this.view.viewport().width) this.playhead.hide();
       else this.playhead.show();
     };

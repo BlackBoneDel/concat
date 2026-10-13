@@ -56,6 +56,59 @@ export function thumbnailKey(file: File): string {
   return `${file.name}:${file.size}:${file.lastModified}`;
 }
 
+/** Size of the library's placeholder art, in pixels. */
+export const PLACEHOLDER_WIDTH = 160;
+export const PLACEHOLDER_HEIGHT = 90;
+
+/** XML-escapes a label for the placeholder SVG. */
+function escapeXml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&apos;');
+}
+
+/** Breaks a long name into at most two lines that fit the 160 px card. */
+/** How many characters fit on the placeholder's first line. */
+const PLACEHOLDER_LINE_CHARS = 24;
+
+/** The extension of a name (`.mp4`), or `''`. */
+function extensionOf(name: string): string {
+  const dot = name.lastIndexOf('.');
+  return dot > 0 && dot < name.length - 1 ? name.slice(dot) : '';
+}
+
+/**
+ * A `160×90` SVG placeholder with the file's name and extension — what the
+ * library card shows between the moment the file is dropped and the moment
+ * the real thumbnail decodes; also the permanent art of a file whose frames
+ * will never decode (a corrupt MP4 keeps its card, it does not disappear).
+ * @param name the file's display name.
+ * @param kind the media kind (label of the badge).
+ * @param note an optional second line (`Procesando…`, `Miniatura no disponible`).
+ * @returns a `data:` URL usable as an `<img src>`.
+ */
+export function placeholderThumbnail(name: string, kind?: string, note?: string): string {
+  const line1 = name.length <= PLACEHOLDER_LINE_CHARS ? name : `${name.slice(0, PLACEHOLDER_LINE_CHARS - 1)}…`;
+  // The note ("Procesando…", "Miniatura no disponible") goes on the second
+  // line; without one, a truncated name still says which format it is.
+  const line2 = note ?? (line1 === name ? '' : extensionOf(name));
+  const badge = kind ? escapeXml(kind.toUpperCase()) : '';
+  const svg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${PLACEHOLDER_WIDTH}" height="${PLACEHOLDER_HEIGHT}" viewBox="0 0 ${PLACEHOLDER_WIDTH} ${PLACEHOLDER_HEIGHT}">` +
+    '<rect width="160" height="90" fill="#1b1d24"/>' +
+    '<rect x="0.5" y="0.5" width="159" height="89" fill="none" stroke="#2f333d"/>' +
+    `<text x="10" y="42" fill="#e6e9ef" font-family="system-ui,sans-serif" font-size="12">${escapeXml(line1)}</text>` +
+    `<text x="10" y="58" fill="#9aa2b1" font-family="system-ui,sans-serif" font-size="11">${escapeXml(line2)}</text>` +
+    (badge
+      ? `<text x="10" y="78" fill="#6f7787" font-family="system-ui,sans-serif" font-size="10" letter-spacing="1">${badge}</text>`
+      : '') +
+    '</svg>';
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 /**
  * Renders one frame to an `ImageBitmap` of `width × height` (aspect kept,
  * letterboxed on transparency).

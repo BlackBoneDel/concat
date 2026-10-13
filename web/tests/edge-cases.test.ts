@@ -335,13 +335,14 @@ describe('panel de diagnóstico ?debug=1', () => {
     expect(detectEngineName('some-crawler/1.0')).toBe('chromium');
   });
 
-  it('collectDiagnostics informa motor, WebCodecs, caches y versión v8', async () => {
+  it('collectDiagnostics informa motor, WebCodecs, caches y versión v9', async () => {
     const info = await collectDiagnostics(env());
     expect(info.engine).toBe('firefox');
     expect(info.videoDecoder).toBe(true);
     expect(info.videoEncoder).toBe(false);
     expect(info.indexedDb).toBe(true);
-    expect(info.cacheVersion).toBe('v8');
+    expect(info.cacheVersion).toBe('v9');
+    // The keys are whatever the platform reports — never filtered by version.
     expect(info.caches).toEqual(['concat-web-v8-abc', 'concat-runtime-v8-abc']);
     // jsdom-style probe ('' to everything) → the documented baseline matrix.
     expect(info.containers).toContain('mp4');

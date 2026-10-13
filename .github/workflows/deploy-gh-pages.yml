@@ -38,6 +38,20 @@ jobs:
           cd web
           npm ci
 
+      # This workflow is the single source of truth for the web editor's
+      # health: the Rust CI in ci.yml no longer runs for web-only changes
+      # (see its `paths-ignore`), so the suite and the type check have to
+      # gate the deploy here. A broken editor never reaches the site.
+      - name: Test (vitest)
+        run: |
+          cd web
+          npm test
+
+      - name: Typecheck (tsc --noEmit)
+        run: |
+          cd web
+          npm run typecheck
+
       - name: Build Project
         run: |
           cd web

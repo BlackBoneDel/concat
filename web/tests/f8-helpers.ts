@@ -176,6 +176,8 @@ export function fakeAsset(options: {
     opfsPath: `media/${options.id}`,
     importedAt: options.importedAt ?? Date.now(),
     file: new Blob([]),
+    // Fase 9: an asset built by hand is a settled one.
+    status: 'ready',
   };
 }
 
@@ -327,6 +329,12 @@ export class FakeDataTransfer implements DataTransferLike {
   dropEffect = '';
   effectAllowed = '';
   dragImage: { image: Element; x: number; y: number } | null = null;
+  /**
+   * The OS files a real file drag carries (`dataTransfer.files`). The
+   * app-wide drop handler imports *these*, not the `Files` marker in the
+   * type list, so the double has to model them too.
+   */
+  files: File[] = [];
 
   get types(): string[] {
     return [...this.data.keys()];
@@ -347,7 +355,8 @@ export class FakeDataTransfer implements DataTransferLike {
   /** A transfer carrying OS files (a real file drag has no MIME map). */
   static files(names: string[]): FakeDataTransfer {
     const transfer = new FakeDataTransfer();
-    for (const name of names) transfer.data.set('Files', name);
+    transfer.data.set('Files', names.join(','));
+    transfer.files = names.map((name) => new File([new Uint8Array(8)], name, { type: 'application/octet-stream' }));
     return transfer;
   }
 }

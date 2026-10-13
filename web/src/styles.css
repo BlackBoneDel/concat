@@ -2843,3 +2843,69 @@ body {
 .header-panel-toggle.active {
   color: var(--accent-primary, var(--accent));
 }
+
+/* -- import feedback (Fase 9) --------------------------------------------- */
+
+/*
+ * The library card exists from the moment the file is dropped: while the
+ * background probe runs it shows a spinner instead of a duration, and the
+ * card of a file the browser cannot read says why instead of vanishing.
+ */
+.media-card[data-status='processing'] {
+  border-color: var(--accent, #6ea8fe);
+}
+
+.media-card[data-status='error'] {
+  border-color: #b4544a;
+}
+
+.media-detail-error {
+  color: #e08b82;
+}
+
+.media-processing {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  width: 12px;
+  height: 12px;
+  border: 2px solid rgb(255 255 255 / 25%);
+  border-top-color: var(--accent, #6ea8fe);
+  border-radius: 50%;
+  animation: concat-spin 0.8s linear infinite;
+  pointer-events: none;
+}
+
+@keyframes concat-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/*
+ * The window-wide drop zone's overlay: any OS file, let go anywhere, imports.
+ */
+.concat-drop-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 90;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  background: rgb(8 10 14 / 72%);
+  border: 2px dashed var(--accent, #6ea8fe);
+  pointer-events: none;
+}
+
+.concat-drop-overlay.is-visible {
+  display: flex;
+}
+
+.concat-drop-overlay-label {
+  padding: 14px 22px;
+  border-radius: 10px;
+  background: rgb(20 22 27 / 92%);
+  color: #f2f4f8;
+  font-size: 15px;
+  font-weight: 600;
+}
