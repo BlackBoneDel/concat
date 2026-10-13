@@ -110,7 +110,7 @@ suite.
   timeline playhead advances with playback.
 - The service worker bypasses `blob:`/`data:`/`file:`/`chrome-extension:`,
   never caches 404/500 or `range` requests, registers as `${BASE_URL}sw.js`
-  with the `/concat/` scope, and the cache schema is now `v9`.
+  with the `/concat/` scope, and the cache schema is now `v10`.
 - `ci.yml` no longer runs for `web/**`-only changes, the Windows desktop entry
   is `continue-on-error` (documented desktop debt) and every job has a hard
   `timeout-minutes`; `deploy-gh-pages.yml` runs `npm test` and
@@ -119,9 +119,13 @@ suite.
 
 **Verifying it**
 
+Node 22 (`web/.nvmrc`, `engines` in `package.json`). jsdom 30 does not load
+on Node 20, and the deploy workflow runs the same version.
+
 ```bash
 cd web
-npm test            # 100+ files, incl. the regression suites below
+npm ci
+npm test            # 101 files, 1046 tests, incl. the regression suites below
 npm run typecheck   # tsc --noEmit, 0 errors
 npm run build       # emits dist/ with relative asset URLs
 
@@ -129,11 +133,25 @@ npm run build       # emits dist/ with relative asset URLs
 # /concat/, driven in Chromium (dispatches a synthetic WebM/MP4/WAV, drops
 # them on the library, the timeline and the background, presses play).
 CONCAT_CHROMIUM=/path/to/chrome node scripts/verify-production.mjs
+
+# Service-worker upgrade: a visitor with the previous build gets this one, and
+# only the new caches survive. Needs a build of the previous commit.
+CONCAT_PREVIOUS_DIST=/path/to/previous/dist CONCAT_CHROMIUM=/path/to/chrome \
+  node scripts/verify-sw-upgrade.mjs
+
+# Mutation check: removes one import/timeline guard at a time and requires the
+# tests that protect it to go red.
+node scripts/mutation-check.mjs
 ```
+
+`puppeteer-core` is not a project dependency; the two browser scripts load it
+from `CONCAT_PUPPETEER` or from a `--no-save` install.
 
 Regression coverage: `tests/import-production-bulletproof.test.ts`,
 `tests/global-drop-and-file-input.test.ts`, `tests/timeline-dnd-media.test.ts`,
-`tests/production-subpath-assets.test.ts` and `tests/ci-workflow-guards.test.ts`.
+`tests/production-subpath-assets.test.ts`, `tests/pwa-register.test.ts`,
+`tests/service-worker-fetch.test.ts` and `tests/ci-workflow-guards.test.ts`
+(the last one pins the Node version the deploy runs on).
 
 ## Fase 8 — arrastrar y soltar de verdad, tiras de miniaturas y HUD estilo CapCut
 

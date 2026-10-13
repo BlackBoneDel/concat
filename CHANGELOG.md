@@ -7,6 +7,18 @@ for the tag being released, and falls back to the commit subjects for a
 release that has none. Releases before 0.2.5 have their notes on the
 releases page only: https://github.com/jub0t/Concat/releases
 
+## Unreleased
+
+### Web editor
+
+- The web editor at https://blackbonedel.github.io/concat/ publishes again.
+  The deploy had been failing at its test step since the import and timeline
+  fixes, because it ran the tests on Node 20 and the test environment needs
+  Node 22. The deploy now runs on Node 22 and no longer falls back to an
+  unlocked install.
+- The service worker moves to cache `v10`. A visitor who has the previous
+  version gets the update banner, and on reload only the new caches remain.
+
 ## 0.2.6 — 2026-10-04
 
 A release for the hands. The timeline gains a razor, a scrollbar and a
