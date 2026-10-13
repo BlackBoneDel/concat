@@ -69,6 +69,37 @@ describe('deploy-gh-pages.yml · es la fuente de verdad de la web', () => {
     expect(deploy).toMatch(/npm run build/);
   });
 
+  // Regression guard for the deploy that failed at the test step on every
+  // push since PR #7: jsdom 30 needs Node >= 22.22.2, and the workflow pinned
+  // Node 20, so vitest died importing it and ~25 test files never ran.
+  it('usa la misma versión de Node que el entorno de tests (web/.nvmrc, >= 22.22.2)', () => {
+    expect(deploy).toMatch(/node-version-file:\s*web\/\.nvmrc/);
+    const nvmrc = readFileSync(resolve('.nvmrc'), 'utf8').trim();
+    const [major, minor, patch] = nvmrc.split('.').map(Number);
+    expect(major).toBeGreaterThanOrEqual(22);
+    // jsdom 30's engines field is ^22.22.2 || ^24.15.0 || >=26.
+    const atLeast2222 = major === 22 && (minor! > 22 || (minor === 22 && patch! >= 2));
+    expect(atLeast2222 || major === 24 || major! >= 26, nvmrc).toBe(true);
+    const pkg = JSON.parse(readFileSync(resolve('package.json'), 'utf8')) as { engines?: { node?: string } };
+    expect(pkg.engines?.node).toBe('>=22.22.2');
+  });
+
+  it('instala con npm ci estricto, sin un fallback a npm install que oculte un lockfile roto', () => {
+    expect(deploy).toMatch(/run:\s*npm ci/);
+    expect(deploy).not.toMatch(/npm ci\s*\|\|/);
+  });
+
+  it('typecheck, test y build son steps separados y el build se verifica antes de publicar', () => {
+    const order = ['npm run typecheck', 'npm test', 'npm run build', 'web/dist/index.html', 'upload-pages-artifact'];
+    const positions = order.map((needle) => deploy.indexOf(needle));
+    for (const [index, position] of positions.entries()) expect(position, order[index]).toBeGreaterThan(-1);
+    expect([...positions].sort((a, b) => a - b)).toEqual(positions);
+  });
+
+  it('no cancela un despliegue de Pages en curso', () => {
+    expect(deploy).toMatch(/group:\s*'?pages'?[\s\S]*?cancel-in-progress:\s*false/);
+  });
+
   it('publica web/dist bajo el sub-path /concat/', () => {
     expect(deploy).toMatch(/path:\s*'web\/dist'/);
     expect(deploy).toMatch(/web\/dist\/\.nojekyll/);
