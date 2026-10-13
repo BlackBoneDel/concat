@@ -964,51 +964,12 @@ class EditorApp implements AppContext {
       ctx.media.toggleProxies();
       ctx.header?.syncProxyToggle();
     });
-    this.shortcuts.bindAction('play', () => {
-      if (ctx.player.isPlaying) ctx.player.pause();
-      else ctx.player.play();
-    });
+    // Transport and edit keys (Space, Ctrl+K, Ctrl+Z, Delete, arrows, zoom…)
+    // belong to the timeline panel's keyboard layer alone. Binding them here
+    // too made every key fire twice: Space toggled play and pause in one
+    // press, and Ctrl+Z walked two undo stacks.
     this.shortcuts.bindAction('save', () => void ctx.saveProject());
     this.shortcuts.bindAction('import', () => ctx.mediaPanel?.openPicker());
-    this.shortcuts.bindAction('delete', () => {
-      const id = ctx.selectedClipId;
-      if (!id) return;
-      ctx.history.push(ctx.session.document, ctx.session.documentSettings());
-      ctx.session.removeClip(id);
-      ctx.selectedClipId = null;
-      ctx.refreshAll();
-      ctx.requestRender();
-      ctx.requestAutosave();
-    });
-    this.shortcuts.bindAction('cut', () => ctx.splitAtPlayhead());
-    this.shortcuts.bindAction('duplicate', () => ctx.duplicateSelection());
-    this.shortcuts.bindAction('undo', () => {
-      const restored = ctx.history.undo(ctx.session.document, ctx.session.documentSettings());
-      if (restored) {
-        ctx.session.document = restored;
-        ctx.session.rebuild();
-        ctx.session.dirty = true;
-        ctx.refreshAll();
-        ctx.requestRender();
-      }
-    });
-    this.shortcuts.bindAction('redo', () => {
-      const restored = ctx.history.redo(ctx.session.document, ctx.session.documentSettings());
-      if (restored) {
-        ctx.session.document = restored;
-        ctx.session.rebuild();
-        ctx.session.dirty = true;
-        ctx.refreshAll();
-        ctx.requestRender();
-      }
-    });
-    this.shortcuts.bindAction('nextFrame', () => ctx.player.stepForward());
-    this.shortcuts.bindAction('prevFrame', () => ctx.player.stepBackward());
-    this.shortcuts.bindAction('goStart', () => ctx.player.seekTo(Rational.ZERO));
-    this.shortcuts.bindAction('goEnd', () => ctx.player.seekTo(ctx.session.duration()));
-    this.shortcuts.bindAction('zoomIn', () => ctx.timelinePanel?.zoomIn());
-    this.shortcuts.bindAction('zoomOut', () => ctx.timelinePanel?.zoomOut());
-    this.shortcuts.bindAction('zoomFit', () => ctx.timelinePanel?.zoomFit());
   }
 
   /** Ctrl+K: splits the clip under the playhead. */
