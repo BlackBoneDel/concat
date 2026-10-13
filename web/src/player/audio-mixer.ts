@@ -268,6 +268,20 @@ export class AudioMixer {
   }
 
   /**
+   * Resumes the context. Browsers start an `AudioContext` suspended until a
+   * user gesture, so the player calls this synchronously from play(); a
+   * rejected resume is logged, never thrown into the render loop.
+   */
+  resume(): void {
+    const pending = this.context.resume?.();
+    if (!pending) return;
+    pending.then(
+      () => console.info('[AudioMixer] resumed'),
+      (error: unknown) => console.warn('[AudioMixer] resume failed', error),
+    );
+  }
+
+  /**
    * Sets the master fader.
    * @param volume 0..2, 1 being unity.
    */

@@ -150,11 +150,21 @@ export class PreviewPlayer {
     return this.mixer ? this.mixer.now : null;
   }
 
+  /**
+   * Sets the preview's output level (the transport slider / mute button).
+   * @param volume 0..1; 0 silences the mix without stopping the clock.
+   */
+  setOutputVolume(volume: number): void {
+    this.mixer?.setMasterVolume(Number.isFinite(volume) ? Math.max(0, Math.min(1, volume)) : 0);
+  }
+
   /** Starts (or resumes) playback. */
   play(): void {
     if (this.destroyed || this.state === 'playing') return;
     if (this.position.compare(this.duration) >= 0) this.position = Rational.ZERO;
     this.state = 'playing';
+    // Autoplay policy: resume inside the user's gesture, before any await.
+    this.mixer?.resume();
     this.anchorWall = performance.now();
     this.anchorTime = this.position;
     this.lastDriftCheck = this.anchorWall;
