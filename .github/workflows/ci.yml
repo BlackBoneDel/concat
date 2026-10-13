@@ -52,8 +52,10 @@ jobs:
     name: Engine tests and lints
     runs-on: ubuntu-latest
     # Belt and braces: the steps below declare their own budgets, and this is
-    # the ceiling that stops a hung `cargo` from holding the queue.
-    timeout-minutes: 60
+    # the ceiling that stops a hung `cargo` from holding the queue. It is set
+    # above the measured run (23.5 min on the last green PR run) with room
+    # for a slow runner, so a healthy run is not killed while a hang still is.
+    timeout-minutes: 35
     env:
       FFMPEG_LINUX: https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-shared-8.1.tar.xz
       # See build-app.yml: the version the ort crate is built against.
