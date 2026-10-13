@@ -29,7 +29,6 @@ import { showContextMenu, showMetadataDialog } from './media-context-menu.ts';
 import { TRANSITION_KINDS } from '../editor/operations.ts';
 import { TEXT_PRESETS } from '../presets/text-presets.ts';
 import { MOTION_PRESETS } from '../presets/motion-presets.ts';
-import { EFFECT_FRAGMENT_SHADERS } from '../media/effects/video-effects.ts';
 import { REQUEST_ADD_TEXT_EVENT } from './ui-events.ts';
 
 /** Subtitle extensions routed to the subtitle importer on drop. */
@@ -50,6 +49,10 @@ export type MediaTab = 'media' | 'text' | 'transitions' | 'effects' | 'filters' 
 
 /** The kind filter of the library tree. */
 type KindFilter = 'all' | 'video' | 'audio' | 'image';
+
+/** The effect catalog the Efectos tab lists (names only: the shaders themselves
+ * load lazily with the effects engine). */
+const EFFECT_NAMES: readonly string[] = Object.freeze(['Blur', 'Vignette', 'Pixelate', 'Noise', 'Glitch']);
 
 /** Human labels of the catalog chips. */
 const TRANSITION_LABELS: Readonly<Record<string, string>> = {
@@ -480,7 +483,7 @@ export class MediaPanel {
     }
     if (tab === 'effects') {
       this.catalogSection('Efectos', 'Se apilan en el inspector del clip seleccionado.');
-      this.chips(Object.keys(EFFECT_FRAGMENT_SHADERS).map((name) => name.charAt(0).toUpperCase() + name.slice(1)));
+      this.chips(EFFECT_NAMES);
       return;
     }
     if (tab === 'filters') {
