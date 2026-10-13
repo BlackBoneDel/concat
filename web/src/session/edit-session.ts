@@ -240,6 +240,33 @@ export class EditSession extends EditorSession {
   }
 
   /**
+   * Cuts clips at one instant as a single undo step — the playhead cut
+   * (Ctrl+K and the toolbar). With no `clipIds`, every clip under the instant
+   * is cut; with some, only those that contain it. Cuts closer than one
+   * frame to a clip edge are skipped by {@link splitClip}.
+   * @param timeSeconds the cut instant.
+   * @param clipIds the clips to consider; empty means all of them.
+   * @returns how many clips were cut (0 = nothing to cut).
+   */
+  splitClipsAt(timeSeconds: number, clipIds: readonly string[] = []): number {
+    const wanted = clipIds.length > 0 ? new Set(clipIds) : null;
+    const targets = currentTimeline(this.document).clips.filter(
+      (clip) =>
+        (wanted === null || wanted.has(clip.id)) &&
+        timeSeconds > clip.start + 1 / 60 &&
+        timeSeconds < clip.start + clip.duration - 1 / 60,
+    );
+    if (targets.length === 0) return 0;
+    this.beginGesture('Dividir en el playhead');
+    let cut = 0;
+    for (const clip of targets) {
+      if (this.splitClip(clip.id, timeSeconds) !== null) cut += 1;
+    }
+    this.commitGesture();
+    return cut;
+  }
+
+  /**
    * Deletes clips (lift or ripple).
    * @param clipIds the clips.
    * @param mode lift keeps the gap, ripple closes it.
