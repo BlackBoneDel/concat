@@ -22,7 +22,7 @@ const SHELL = ['./', './index.html', './offline.html', './manifest.json', './ico
  * stale GitHub Pages shells of earlier fases get evicted. Keep in sync
  * with SW_CACHE_VERSION in src/pwa/sw-register.ts.
  */
-const CACHE_VERSION = 'v8';
+const CACHE_VERSION = 'v9';
 const CACHE = `concat-web-${CACHE_VERSION}-${BUILD_ID}`;
 const RUNTIME = `concat-runtime-${CACHE_VERSION}-${BUILD_ID}`;
 
@@ -71,12 +71,22 @@ async function networkFirst(request) {
   }
 }
 
+/*
+ * Schemes the cache must never see. `blob:` URLs share our origin, so the
+ * `url.origin` test below would happily accept a 30 GB media object or a
+ * decoded frame; `data:`, `file:` and `chrome-extension:` are not fetchable
+ * from a page cache either. They bypass the worker entirely.
+ */
+const CACHEABLE_PROTOCOLS = ['http:', 'https:'];
+
 self.addEventListener('fetch', (event) => {
   const request = event.request;
+  // Range requests (media seeking) and everything that is not a GET are
+  // passed straight to the network: a cached 200 is not a 206, and serving
+  // one where the other was asked for breaks <video> playback.
   if (request.method !== 'GET' || request.headers.has('range')) return;
   const url = new URL(request.url);
-  // blob: can share our origin; never pass local schemes to fetch/cache.
-  if (url.protocol !== 'http:' && url.protocol !== 'https:') return;
+  if (!CACHEABLE_PROTOCOLS.includes(url.protocol)) return;
   if (url.origin !== self.location.origin) return;
   // Only cache this app, not other projects hosted on the same domain.
   if (!url.href.startsWith(self.registration.scope)) return;
