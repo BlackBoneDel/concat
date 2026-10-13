@@ -154,6 +154,12 @@ export class MediaDecoder {
   private element: HTMLVideoElement | null = null;
   private elementUrl: string | null = null;
   private readonly frameCache = new Map<number, CacheEntry>();
+  /** Index of the last sample fed to the live decoder; -1 when none is running. */
+  private fedUpTo = -1;
+  /** Decoded frames not yet handed out, in presentation order. Owned here. */
+  private ready: VideoFrame[] = [];
+  /** The configuration the live decoder was given; reset() needs it again. */
+  private decoderConfig: VideoDecoderConfig | null = null;
   private audioBuffer: AudioBuffer | null | undefined;
   private closed = false;
   private serial: Promise<unknown> = Promise.resolve();
@@ -350,20 +356,25 @@ export class MediaDecoder {
       }
       return;
     }
-    const chunks = this.videoTrack!;
-    const demuxer = this.demuxer!;
-    const from = MP4Demuxer.sampleAt(chunks, start.asNumber());
-    const to = MP4Demuxer.sampleAt(chunks, end.asNumber());
-    const keyFrom = MP4Demuxer.keyframeBefore(chunks, from);
-    const decoder = this.ensureVideoDecoder();
-    if (!decoder) return;
-    this.pending.length = 0;
-    for (let i = keyFrom; i <= to && i < chunks.samples.length; i += 1) {
-      decoder.decode(this.encodedChunk(chunks, i, demuxer));
-    }
-    await decoder.flush();
-    const frames = [...this.pending];
-    this.pending.length = 0;
+    // The decoder is shared with getFrame: run inside the same queue so a
+    // reset here can never abort a flush there.
+    const frames = await this.enqueue(async (): Promise<VideoFrame[]> => {
+      const chunks = this.videoTrack;
+      const demuxer = this.demuxer;
+      const decoder = this.ensureVideoDecoder();
+      if (!chunks || !demuxer || !decoder) return [];
+      const from = MP4Demuxer.sampleAt(chunks, start.asNumber());
+      const to = MP4Demuxer.sampleAt(chunks, end.asNumber());
+      const keyFrom = MP4Demuxer.keyframeBefore(chunks, from);
+      this.resetPipeline();
+      for (let i = keyFrom; i <= to && i < chunks.samples.length; i += 1) {
+        decoder.decode(this.encodedChunk(chunks, i, demuxer));
+      }
+      await decoder.flush();
+      const out = [...this.pending];
+      this.pending.length = 0;
+      return out;
+    });
     for (const frame of frames) {
       if (frame.timestamp / 1e6 >= start.asNumber() - 1e-6 && frame.timestamp / 1e6 < end.asNumber()) {
         yield frame;
@@ -417,6 +428,9 @@ export class MediaDecoder {
     this.frameCache.clear();
     this.videoDecoder?.close();
     this.videoDecoder = null;
+    for (const frame of this.ready) frame.close();
+    this.ready = [];
+    this.fedUpTo = -1;
     if (this.element) {
       this.element.removeAttribute('src');
       this.element.load();
@@ -460,11 +474,13 @@ export class MediaDecoder {
         output: (frame) => this.pending.push(frame),
         error: () => this.dropDecoder(),
       });
-      decoder.configure({
+      const config: VideoDecoderConfig = {
         codec: track.codec,
         description: track.description ?? undefined,
         optimizeForLatency: true,
-      });
+      };
+      decoder.configure(config);
+      this.decoderConfig = config;
       this.videoDecoder = decoder;
       return decoder;
     } catch {
@@ -475,35 +491,112 @@ export class MediaDecoder {
   /** Frames decoded since the last reset of the pipeline. */
   private pending: VideoFrame[] = [];
 
-  /** Decodes forward from the keyframe before `time` and returns that frame. */
+  /**
+   * Returns the frame at `time` from the live decoder. Playing forward feeds
+   * only the samples after the last fed one, so each frame costs one decode,
+   * not a re-decode from the keyframe. A seek backwards, or a jump into a GOP
+   * the decoder has not reached, restarts at that GOP's keyframe.
+   *
+   * `flush()` is avoided on this path: WebCodecs then requires a keyframe
+   * before the next chunk, which would break forward playback. The decoder's
+   * queue is drained instead; `flush()` is the last resort at the end of the
+   * media, and the next request then restarts at a keyframe.
+   */
   private async decodeFrameWebCodecs(time: number): Promise<RenderImage | null> {
     const track = this.videoTrack;
     const demuxer = this.demuxer;
     const decoder = this.ensureVideoDecoder();
     if (!track || !demuxer || !decoder) return null;
     const target = MP4Demuxer.sampleAt(track, time);
-    const from = MP4Demuxer.keyframeBefore(track, target);
-    this.pending.length = 0;
-    const end = Math.min(track.samples.length - 1, target + 2);
-    for (let i = from; i <= end; i += 1) {
-      decoder.decode(this.encodedChunk(track, i, demuxer));
+    const gopStart = MP4Demuxer.keyframeBefore(track, target);
+    if (this.fedUpTo < 0 || target < this.fedUpTo || gopStart > this.fedUpTo) {
+      this.resetPipeline();
+      this.fedUpTo = gopStart - 1;
     }
-    await decoder.flush();
-    const frames = [...this.pending];
-    this.pending.length = 0;
-    // Prefer the first frame at or after the target; else the last one
-    // before it. Everything else is closed — the cache holds at most one.
-    const atOrAfter = frames
-      .filter((frame) => frame.timestamp / 1e6 >= time - 1e-3)
-      .sort((a, b) => a.timestamp - b.timestamp);
-    const before = frames
-      .filter((frame) => frame.timestamp / 1e6 < time - 1e-3)
-      .sort((a, b) => b.timestamp - a.timestamp);
-    const chosen = atOrAfter[0] ?? before[0] ?? null;
-    for (const frame of frames) {
-      if (frame !== chosen) frame.close();
+    const last = track.samples.length - 1;
+    // Two samples of look-ahead cover B-frame reordering; more if needed.
+    this.feedThrough(Math.min(last, target + 2));
+    await this.drainDecoder();
+    let chosen = this.pickFrame(time);
+    while (!chosen && this.fedUpTo < last) {
+      this.feedThrough(Math.min(last, this.fedUpTo + 4));
+      await this.drainDecoder();
+      chosen = this.pickFrame(time);
+    }
+    if (!chosen) {
+      // End of the media (or a stuck decoder): flush once, then restart on the next call.
+      try {
+        await decoder.flush();
+      } catch {
+        this.dropDecoder();
+        return null;
+      }
+      this.ready.push(...this.pending);
+      this.pending.length = 0;
+      this.fedUpTo = -1;
+      chosen = this.pickFrame(time);
     }
     return chosen;
+  }
+
+  /** Feeds every sample up to and including `end` that is not yet fed. */
+  private feedThrough(end: number): void {
+    const track = this.videoTrack;
+    const demuxer = this.demuxer;
+    const decoder = this.videoDecoder;
+    if (!track || !demuxer || !decoder) return;
+    for (let i = this.fedUpTo + 1; i <= end; i += 1) {
+      decoder.decode(this.encodedChunk(track, i, demuxer));
+    }
+    this.fedUpTo = Math.max(this.fedUpTo, end);
+  }
+
+  /** Waits until the decoder has consumed its queue and its outputs have landed. */
+  private async drainDecoder(): Promise<void> {
+    const decoder = this.videoDecoder;
+    for (let spin = 0; decoder && decoder.decodeQueueSize > 0 && spin < 2000; spin += 1) {
+      await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 2));
+    }
+    await new Promise<void>((resolve) => globalThis.setTimeout(resolve, 0));
+    this.ready.push(...this.pending);
+    this.pending.length = 0;
+  }
+
+  /**
+   * Picks the frame for `time` from the decoded ones, closing the stale ones.
+   * The frame at or just after the instant; else the last one before it.
+   */
+  private pickFrame(time: number): VideoFrame | null {
+    const sorted = this.ready.sort((a, b) => a.timestamp - b.timestamp);
+    const atOrAfter = sorted.find((frame) => frame.timestamp / 1e6 >= time - 1e-3) ?? null;
+    const before = sorted.filter((frame) => frame.timestamp / 1e6 < time - 1e-3).pop() ?? null;
+    const chosen = atOrAfter ?? before;
+    if (!chosen) return null;
+    // Frames older than the chosen one are never needed again going forward.
+    const keep: VideoFrame[] = [];
+    for (const frame of sorted) {
+      if (frame === chosen) continue;
+      if (frame.timestamp < chosen.timestamp) frame.close();
+      else keep.push(frame);
+    }
+    this.ready = keep;
+    return chosen;
+  }
+
+  /** Discards every decoded frame and the decoder's queue; keeps the decoder. */
+  private resetPipeline(): void {
+    for (const frame of this.ready) frame.close();
+    this.ready = [];
+    for (const frame of this.pending) frame.close();
+    this.pending.length = 0;
+    const decoder = this.videoDecoder;
+    if (decoder && decoder.state !== 'closed' && this.decoderConfig) {
+      // Per WebCodecs, reset() leaves the decoder "unconfigured": configure it
+      // again, or the next decode() throws InvalidStateError.
+      if (decoder.state === 'configured') decoder.reset();
+      decoder.configure(this.decoderConfig);
+    }
+    this.fedUpTo = -1;
   }
 
   /** One sample as a coded chunk. */
@@ -648,7 +741,11 @@ export class MediaDecoder {
   }
 
   private dropDecoder(): void {
+    if (this.videoDecoder && this.videoDecoder.state !== 'closed') this.videoDecoder.close();
     this.videoDecoder = null;
+    for (const frame of this.ready) frame.close();
+    this.ready = [];
+    this.fedUpTo = -1;
   }
 }
 

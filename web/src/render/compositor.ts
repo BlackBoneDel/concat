@@ -67,6 +67,10 @@ export async function renderFrame(
   const ctx = canvas.getContext('2d');
   if (!ctx) return;
 
+  // Every frame is resolved before the first pixel is painted. Clearing to the
+  // background while a decode was still pending showed black between frames.
+  const prefetched = await prefetchFrames(timeline, time, mediaPool);
+
   const frameWidth = timeline.width;
   const frameHeight = timeline.height;
 
@@ -88,10 +92,66 @@ export async function renderFrame(
     for (const clipId of track.clips()) {
       const clip = timeline.clip(clipId);
       if (!clip || !clip.contains(time)) continue;
-      await drawClip(ctx, timeline, clip, time, mediaPool, options);
+      await drawClip(ctx, timeline, clip, time, mediaPool, options, prefetched);
     }
   }
   ctx.setTransform(1, 0, 0, 1, 0, 0);
+}
+
+/** A prefetched frame: the image, or the error the decoder raised. */
+type Settled = { ok: true; image: RenderImage | null } | { ok: false; error: unknown };
+
+/** The kind of a clip as the compositor reads it (media unless an editor says otherwise). */
+function clipKind(clip: Clip): string {
+  return (clip instanceof EditorClip ? clip.kind : undefined) ?? 'video';
+}
+
+/**
+ * Resolves the frame of every clip that will be drawn at `time`, so the
+ * compositor can clear and paint in one go. Errors are kept, not thrown here:
+ * {@link drawClip} rethrows them where the missing-media slate handles them.
+ * @param timeline the timeline.
+ * @param time the playhead.
+ * @param mediaPool where frames come from.
+ * @returns the settled frame per clip.
+ */
+async function prefetchFrames(timeline: Timeline, time: Rational, mediaPool: FramePool): Promise<Map<Clip, Settled>> {
+  const wanted: { clip: Clip; sourceTime: Rational }[] = [];
+  for (const [, track] of timeline.tracks()) {
+    if (!track.enabled) continue;
+    for (const clipId of track.clips()) {
+      const clip = timeline.clip(clipId);
+      if (!clip || !clip.contains(time)) continue;
+      const kind = clipKind(clip);
+      if (kind === 'text' || kind === 'shape' || kind === 'layer') continue;
+      if (clip.opacityAt(time) * clip.videoFadeFactor(time) <= 0) continue;
+      const sourceTime = clip.sourceTimeAt(time);
+      if (sourceTime) wanted.push({ clip, sourceTime });
+    }
+  }
+  // One request at a time within a composite: the decoders are CPU-bound.
+  const settled = new Map<Clip, Settled>();
+  for (const { clip, sourceTime } of wanted) {
+    try {
+      settled.set(clip, { ok: true, image: await mediaPool.getFrame(clip.media.path, sourceTime) });
+    } catch (error) {
+      settled.set(clip, { ok: false, error });
+    }
+  }
+  return settled;
+}
+
+/** The frame of a clip: the prefetched one when there is one, else a fresh request. */
+async function frameFor(
+  clip: Clip,
+  sourceTime: Rational,
+  mediaPool: FramePool,
+  prefetched: Map<Clip, Settled>,
+): Promise<RenderImage | null> {
+  const settled = prefetched.get(clip);
+  if (!settled) return mediaPool.getFrame(clip.media.path, sourceTime);
+  if (!settled.ok) throw settled.error;
+  return settled.image;
 }
 
 /** Paints one active clip in frame space. */
@@ -102,6 +162,7 @@ async function drawClip(
   time: Rational,
   mediaPool: FramePool,
   options: RenderOptions = {},
+  prefetched: Map<Clip, Settled> = new Map(),
 ): Promise<void> {
   // The four engine calls — the single definition every renderer agrees with.
   const sourceTime = clip.sourceTimeAt(time);
@@ -153,7 +214,7 @@ async function drawClip(
   const size = mediaPool.getSize(clip.media.path);
   let source: RenderImage | null;
   try {
-    source = await mediaPool.getFrame(clip.media.path, sourceTime);
+    source = await frameFor(clip, sourceTime, mediaPool, prefetched);
   } catch (error) {
     // Fase 7 hook (QA): a deleted file / dead decoder mid-playback.
     if (options.missingMedia !== 'slate') throw error;
