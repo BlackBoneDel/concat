@@ -1,10 +1,16 @@
 name: Deploy Concat Web to GitHub Pages
 
+# The web editor's only deploy. Runs for changes under web/ (and for this file
+# itself), plus by hand. Because it is path-filtered, a web-only commit always
+# gets a status from this workflow even though ci.yml ignores web/**.
+
 on:
   push:
     branches:
       - main
-      - master
+    paths:
+      - 'web/**'
+      - '.github/workflows/deploy-gh-pages.yml'
   workflow_dispatch:
 
 permissions:
@@ -12,58 +18,79 @@ permissions:
   pages: write
   id-token: write
 
+# Never cancel a Pages deployment in progress: cancelling one mid-upload can
+# leave the site half-published. Queue instead, newest run wins afterwards.
 concurrency:
-  group: 'pages'
-  cancel-in-progress: true
+  group: pages
+  cancel-in-progress: false
 
 jobs:
   build-and-deploy:
+    name: Build and deploy the web editor
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
-    runs-on: ubuntu-latest
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
+      # Node 22, not 20: jsdom 30 (web/package.json devDependencies) requires
+      # ^22.22.2 || ^24.15.0 || >=26. On Node 20 its import fails inside
+      # vitest and about 25 test files never run, which failed this job at
+      # the test step on every push. Keep this in step with web/.nvmrc.
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version-file: web/.nvmrc
           cache: 'npm'
-          cache-dependency-path: 'web/package-lock.json'
+          cache-dependency-path: web/package-lock.json
 
+      # Strict install: `npm ci` fails when package.json and the lockfile
+      # disagree. It is deliberately not followed by a fallback to `npm
+      # install`, which would hide the drift and build something other than
+      # what was locked.
       - name: Install Dependencies
-        run: |
-          cd web
-          npm ci
+        working-directory: web
+        run: npm ci --no-audit --no-fund
 
-      # This workflow is the single source of truth for the web editor's
-      # health: the Rust CI in ci.yml no longer runs for web-only changes
-      # (see its `paths-ignore`), so the suite and the type check have to
-      # gate the deploy here. A broken editor never reaches the site.
-      - name: Test (vitest)
-        run: |
-          cd web
-          npm test
+      - name: Typecheck
+        working-directory: web
+        run: npm run typecheck
 
-      - name: Typecheck (tsc --noEmit)
-        run: |
-          cd web
-          npm run typecheck
+      - name: Test
+        working-directory: web
+        run: npm test
 
-      - name: Build Project
-        run: |
-          cd web
-          npm run build
+      - name: Build
+        working-directory: web
+        run: npm run build
 
+      - name: Verify build output
+        run: |
+          set -euo pipefail
+          test -f web/dist/index.html
+          test -f web/dist/sw.js
+          test -f web/dist/vendor/ffmpeg/ffmpeg-core.wasm
+          # The service worker's build id and precache list are filled in by
+          # the build plugin; placeholders left behind mean it was not built.
+          if grep -q '__CONCAT_BUILD_ID__' web/dist/sw.js; then
+            echo "sw.js still has the __CONCAT_BUILD_ID__ placeholder"; exit 1
+          fi
+          if grep -q '/\*__CONCAT_PRECACHE__\*/' web/dist/sw.js; then
+            echo "sw.js still has the precache placeholder"; exit 1
+          fi
+
+      # GitHub Pages runs Jekyll unless this marker exists. Jekyll drops
+      # files and folders whose names start with an underscore.
       - name: Create .nojekyll
         run: touch web/dist/.nojekyll
 
       - name: Setup Pages
-        uses: actions/configure-pages@v4
+        uses: actions/configure-pages@v5
 
-      - name: Upload Artifact
+      - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
           path: 'web/dist'

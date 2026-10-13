@@ -291,7 +291,7 @@ async function main() {
       return { scope: registration?.scope ?? null, active: registration?.active?.scriptURL ?? null, keys };
     });
     check('el service worker se registra con scope /concat/', sw.scope === `${url}` && (sw.active ?? '').endsWith('/concat/sw.js'), JSON.stringify(sw));
-    check('el esquema de caché es v9', sw.keys.every((key) => key.includes('-v9-')), sw.keys.join(', '));
+    check('el esquema de caché es v10', sw.keys.every((key) => key.includes('-v10-')), sw.keys.join(', '));
     const swSource = await (await fetch(`${url}sw.js`)).text();
     check('sw.js no cachea esquemas locales (blob:/data:/file:)', /CACHEABLE_PROTOCOLS/.test(swSource) && /includes\(url\.protocol\)/.test(swSource));
     check('sw.js no cachea respuestas de error', /response\.ok && response\.status === 200/.test(swSource));

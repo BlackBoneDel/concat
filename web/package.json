@@ -4,6 +4,9 @@
   "private": true,
   "description": "Concat — the open-source video editor, now as a 100% local web app. Fase 1: core model and project schema.",
   "license": "AGPL-3.0-or-later",
+  "engines": {
+    "node": ">=22.22.2"
+  },
   "type": "module",
   "scripts": {
     "dev": "vite",

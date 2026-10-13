@@ -22,7 +22,7 @@ const SHELL = ['./', './index.html', './offline.html', './manifest.json', './ico
  * stale GitHub Pages shells of earlier fases get evicted. Keep in sync
  * with SW_CACHE_VERSION in src/pwa/sw-register.ts.
  */
-const CACHE_VERSION = 'v9';
+const CACHE_VERSION = 'v10';
 const CACHE = `concat-web-${CACHE_VERSION}-${BUILD_ID}`;
 const RUNTIME = `concat-runtime-${CACHE_VERSION}-${BUILD_ID}`;
 

@@ -219,16 +219,16 @@ describe('public PWA files', () => {
   });
 });
 
-// -- Fase 7 + Parte B: invalidación del cache del SW (v8 → v9) -------------
+// -- Fase 7 + Parte B: invalidación del cache del SW (v8 → v9 → v10) -------------
 
 import { SW_CACHE_VERSION } from '../src/pwa/sw-register.ts';
 
-describe('service-worker cache v9', () => {
+describe('service-worker cache v10', () => {
   const readSw = (): string => readFileSync(new URL('../public/sw.js', import.meta.url), 'utf8');
 
-  it('declara CACHE_VERSION v9 (Parte B: una versión nueva por despliegue)', () => {
-    expect(readSw()).toMatch(/const CACHE_VERSION = 'v9';/);
-    expect(SW_CACHE_VERSION).toBe('v9');
+  it('declara CACHE_VERSION v10 (Parte B: una versión nueva por despliegue)', () => {
+    expect(readSw()).toMatch(/const CACHE_VERSION = 'v10';/);
+    expect(SW_CACHE_VERSION).toBe('v10');
   });
 
   it('los nombres de cache incluyen la versión y el build id', () => {
